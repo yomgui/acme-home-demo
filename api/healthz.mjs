@@ -23,7 +23,8 @@ var identitySchema = z.discriminatedUnion("identityMode", [
     synthetic: z.literal(false),
     subjectShort: z.string().min(1),
     email: z.string(),
-    org_id: z.string().min(1)
+    identity_issuer: z.string().min(1).max(2048),
+    org_id: z.string().min(1).nullable().default(null)
   })
 ]);
 var base = {
@@ -129,7 +130,8 @@ var realIdentitySchema = z3.object({
   sub: boundedClaim(256),
   name: boundedClaim(256),
   email: boundedClaim(320),
-  org_id: boundedClaim(256)
+  identity_issuer: boundedClaim(2048),
+  org_id: boundedClaim(256).nullable().default(null)
 });
 var downstreamSchema = z3.object({
   client_id: boundedClaim(512),

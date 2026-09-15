@@ -63,6 +63,13 @@ export function profileForSubject(sub: string) {
     synthetic: true as const,
   };
 }
+export function identityKey(
+  identity: Pick<OpenWorkIdentity, "identity_issuer" | "sub">,
+): string {
+  return createHash("sha256")
+    .update(JSON.stringify([identity.identity_issuer, identity.sub]))
+    .digest("hex");
+}
 export function profileForIdentity(identity: OpenWorkIdentity): Identity {
   const parts = identity.name.trim().split(/\s+/);
   return {
@@ -74,10 +81,8 @@ export function profileForIdentity(identity: OpenWorkIdentity): Identity {
       .map((part) => Array.from(part)[0])
       .join("")
       .toUpperCase(),
-    fingerprint: createHash("sha256")
-      .update(JSON.stringify([identity.org_id, identity.sub]))
-      .digest("hex")
-      .slice(0, 12),
+    fingerprint: identityKey(identity).slice(0, 12),
+    identity_issuer: identity.identity_issuer,
     subjectShort: identity.sub.slice(0, 12),
     identityMode: "openwork",
     synthetic: false,

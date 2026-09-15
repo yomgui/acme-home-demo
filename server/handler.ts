@@ -12,6 +12,7 @@ import {
 } from "./oauth.ts";
 import {
   createPersonalProvider,
+  identityKey,
   createSyntheticProvider,
   type WidgetProvider,
 } from "./provider.ts";
@@ -151,11 +152,8 @@ export function createHandler(options: HandlerOptions = {}) {
     }
     let factory = sharedServer;
     if (identity) {
-      const subject = "org_id" in identity ? identity : identity.sub;
-      const key =
-        typeof subject === "string"
-          ? subject
-          : JSON.stringify([subject.org_id, subject.sub]);
+      const subject = "identity_issuer" in identity ? identity : identity.sub;
+      const key = typeof subject === "string" ? subject : identityKey(subject);
       let provider = providers.get(key);
       if (!provider) {
         provider = createPersonalProvider(subject, instance);

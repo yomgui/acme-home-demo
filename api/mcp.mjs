@@ -32,7 +32,8 @@ var identitySchema = z.discriminatedUnion("identityMode", [
     synthetic: z.literal(false),
     subjectShort: z.string().min(1),
     email: z.string(),
-    org_id: z.string().min(1)
+    identity_issuer: z.string().min(1).max(2048),
+    org_id: z.string().min(1).nullable().default(null)
   })
 ]);
 var base = {
@@ -441,7 +442,8 @@ var realIdentitySchema = z3.object({
   sub: boundedClaim(256),
   name: boundedClaim(256),
   email: boundedClaim(320),
-  org_id: boundedClaim(256)
+  identity_issuer: boundedClaim(2048),
+  org_id: boundedClaim(256).nullable().default(null)
 });
 var downstreamSchema = z3.object({
   client_id: boundedClaim(512),
@@ -675,7 +677,7 @@ function createUpstream(appIssuer, privateKey, configuredIssuer = DEFAULT_UPSTRE
       "default-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'"
     );
     res.end(
-      '<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Sign-in expired</title></head><body><main><h1>Sign-in expired, try again</h1><p>Return to your app connection and choose Connect to start a new sign-in. This page will not retry automatically.</p></main></body></html>'
+      `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Sign-in expired</title></head><body><main><h1>Sign-in expired, try again</h1><p>Stage: ${diagnosticFor(error, fallback).stage}</p><p>Return to your app connection and choose Connect to start a new sign-in. This page will not retry automatically.</p></main></body></html>`
     );
   }
   async function begin(res, downstream) {
@@ -840,18 +842,22 @@ function createUpstream(appIssuer, privateKey, configuredIssuer = DEFAULT_UPSTRE
       headers: { Authorization: `Bearer ${tokenPair.accessToken}` }
     });
     if (userinfo.sub !== sub) throw new SignInError("userinfo-subject");
-    if (claims[ORG_CLAIM] === void 0 || claims[ORG_CLAIM] === null)
-      throw new SignInError("missing-org-claim");
-    const org = await signInStep(
-      "org-claim-validation",
-      () => boundedClaim(256).parse(claims[ORG_CLAIM])
-    );
-    if (userinfo[ORG_CLAIM] !== void 0 && userinfo[ORG_CLAIM] !== org || userinfo.org_id !== void 0 && userinfo.org_id !== org)
-      throw new SignInError("org-claim-validation");
+    const org = await signInStep("org-claim-validation", () => {
+      const present = [
+        claims[ORG_CLAIM],
+        claims.org_id,
+        userinfo[ORG_CLAIM],
+        userinfo.org_id
+      ].filter((value) => value !== void 0 && value !== null).map((value) => boundedClaim(256).parse(value));
+      if (new Set(present).size > 1)
+        throw new SignInError("org-claim-validation");
+      return present[0] ?? null;
+    });
     const identity = await signInStep(
       "profile-claims",
       () => realIdentitySchema.parse({
         identityMode: "openwork",
+        identity_issuer: claims.iss,
         sub,
         name: claims.name ?? userinfo.name,
         email: claims.email ?? userinfo.email,
@@ -1000,10 +1006,11 @@ function createOAuth(options = {}) {
   const identityMode = options.identityMode ?? process.env.IDENTITY_MODE ?? "openwork";
   if (identityMode !== "openwork" && identityMode !== "demo")
     throw new Error("IDENTITY_MODE must be openwork or demo");
+  const configuredUpstreamIssuer = options.upstreamIssuer ?? process.env.UPSTREAM_ISSUER ?? DEFAULT_UPSTREAM_ISSUER;
   const upstream = identityMode === "openwork" ? createUpstream(
     issuer,
     privateKey,
-    options.upstreamIssuer ?? process.env.UPSTREAM_ISSUER,
+    configuredUpstreamIssuer,
     options.upstreamOptions
   ) : void 0;
   const description = identityMode === "demo" ? "demo authorization server: accepts every request; codes are short-lived, not single-use" : "OpenWork OIDC identity; synthetic work data; downstream codes are short-lived, not single-use";
@@ -1103,14 +1110,19 @@ function createOAuth(options = {}) {
     }
   }
   function identityClaims(payload) {
-    if (identityMode === "openwork")
-      return realIdentitySchema.parse({
+    if (identityMode === "openwork") {
+      const identity = realIdentitySchema.parse({
         identityMode: "openwork",
+        identity_issuer: payload.identity_issuer,
         sub: payload.sub,
         name: payload.name,
         email: payload.email,
         org_id: payload.org_id
       });
+      if (identity.identity_issuer !== configuredUpstreamIssuer)
+        throw new Error("Invalid identity issuer");
+      return identity;
+    }
     if (typeof payload.sub !== "string" || !UUID.test(payload.sub))
       throw new Error("Invalid demo subject");
     return { sub: payload.sub };
@@ -1373,6 +1385,9 @@ function profileForSubject(sub) {
     synthetic: true
   };
 }
+function identityKey(identity) {
+  return createHash4("sha256").update(JSON.stringify([identity.identity_issuer, identity.sub])).digest("hex");
+}
 function profileForIdentity(identity) {
   const parts = identity.name.trim().split(/\s+/);
   return {
@@ -1380,7 +1395,8 @@ function profileForIdentity(identity) {
     firstName: parts[0] || identity.name,
     role: "OpenWork member",
     avatar: parts.slice(0, 2).map((part) => Array.from(part)[0]).join("").toUpperCase(),
-    fingerprint: createHash4("sha256").update(JSON.stringify([identity.org_id, identity.sub])).digest("hex").slice(0, 12),
+    fingerprint: identityKey(identity).slice(0, 12),
+    identity_issuer: identity.identity_issuer,
     subjectShort: identity.sub.slice(0, 12),
     identityMode: "openwork",
     synthetic: false,
@@ -1856,8 +1872,8 @@ function createHandler(options = {}) {
     }
     let factory = sharedServer;
     if (identity) {
-      const subject = "org_id" in identity ? identity : identity.sub;
-      const key = typeof subject === "string" ? subject : JSON.stringify([subject.org_id, subject.sub]);
+      const subject = "identity_issuer" in identity ? identity : identity.sub;
+      const key = typeof subject === "string" ? subject : identityKey(subject);
       let provider = providers.get(key);
       if (!provider) {
         provider = createPersonalProvider(subject, instance);

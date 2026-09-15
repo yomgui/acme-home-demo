@@ -12,6 +12,7 @@ import { jwtVerify, SignJWT, type JWTPayload } from "jose";
 export type OAuthRequest = IncomingMessage & { body?: unknown };
 import {
   createUpstream,
+  DEFAULT_UPSTREAM_ISSUER,
   CALLBACK_PATH,
   realIdentitySchema,
   type DownstreamRequest,
@@ -201,12 +202,16 @@ export function createOAuth(options: OAuthOptions = {}) {
     options.identityMode ?? process.env.IDENTITY_MODE ?? "openwork";
   if (identityMode !== "openwork" && identityMode !== "demo")
     throw new Error("IDENTITY_MODE must be openwork or demo");
+  const configuredUpstreamIssuer =
+    options.upstreamIssuer ??
+    process.env.UPSTREAM_ISSUER ??
+    DEFAULT_UPSTREAM_ISSUER;
   const upstream =
     identityMode === "openwork"
       ? createUpstream(
           issuer,
           privateKey,
-          options.upstreamIssuer ?? process.env.UPSTREAM_ISSUER,
+          configuredUpstreamIssuer,
           options.upstreamOptions,
         )
       : undefined;
@@ -353,14 +358,19 @@ export function createOAuth(options: OAuthOptions = {}) {
     }
   }
   function identityClaims(payload: JWTPayload): AccessIdentity {
-    if (identityMode === "openwork")
-      return realIdentitySchema.parse({
+    if (identityMode === "openwork") {
+      const identity = realIdentitySchema.parse({
         identityMode: "openwork",
+        identity_issuer: payload.identity_issuer,
         sub: payload.sub,
         name: payload.name,
         email: payload.email,
         org_id: payload.org_id,
       });
+      if (identity.identity_issuer !== configuredUpstreamIssuer)
+        throw new Error("Invalid identity issuer");
+      return identity;
+    }
     if (typeof payload.sub !== "string" || !UUID.test(payload.sub))
       throw new Error("Invalid demo subject");
     return { sub: payload.sub };

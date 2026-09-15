@@ -31,7 +31,8 @@ export const identitySchema = z.discriminatedUnion("identityMode", [
     synthetic: z.literal(false),
     subjectShort: z.string().min(1),
     email: z.string(),
-    org_id: z.string().min(1),
+    identity_issuer: z.string().min(1).max(2048),
+    org_id: z.string().min(1).nullable().default(null),
   }),
 ]);
 export type Identity = z.infer<typeof identitySchema>;

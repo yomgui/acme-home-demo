@@ -17,6 +17,7 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { createHandler, type HandlerOptions } from "../server/handler.ts";
 import { createOAuth } from "../server/oauth.ts";
+import { createPersonalProvider, identityKey } from "../server/provider.ts";
 import { createHttpApp } from "../server/http.ts";
 import { createServer as createMcpServer } from "../server/server.ts";
 import {
@@ -50,14 +51,17 @@ const privateKey = generateKeyPairSync("ed25519").privateKey;
 const privateKeyPem = privateKey
   .export({ format: "pem", type: "pkcs8" })
   .toString();
-const alice: OpenWorkIdentity = {
+type FixtureIdentity = Omit<OpenWorkIdentity, "identity_issuer" | "org_id"> & {
+  org_id: string;
+};
+const alice: FixtureIdentity = {
   identityMode: "openwork",
   sub: "usr-alice-opaque-123",
   name: "Alice Martin",
   email: "alice@example.test",
   org_id: "org-north",
 };
-const bob: OpenWorkIdentity = {
+const bob: FixtureIdentity = {
   identityMode: "openwork",
   sub: "usr-bob-opaque-456",
   name: "Bob Laurent",
@@ -114,10 +118,10 @@ async function stub(t: TestContext) {
       redirect: string;
       challenge: string;
       nonce: string;
-      user: OpenWorkIdentity;
+      user: FixtureIdentity;
     }
   >();
-  const accesses = new Map<string, OpenWorkIdentity>();
+  const accesses = new Map<string, FixtureIdentity>();
   const patches: {
     patch: Record<string, unknown>;
     omit: string[];
@@ -529,6 +533,7 @@ async function rejected(response: Response) {
   assert.match(text(response.headers.get("content-type")), /^text\/html/);
   const html = await response.text();
   assert.ok(html.includes("Sign-in expired, try again"));
+  assert.match(html, /<p>Stage: [a-z-]+<\/p>/);
   assert.ok(
     !html.includes("<script") &&
       !html.includes("http") &&
@@ -736,7 +741,7 @@ test("environment client wins over Blob and supports exact public/post/basic aut
   assert.equal(upstream.state.registrations, 0);
 });
 
-test("staged diagnostics distinguish token rejection from missing org and remain redacted; callbacks consume binding without retry", async (t) => {
+test("staged diagnostics distinguish token rejection from conflicting org and remain redacted; callbacks consume binding without retry", async (t) => {
   const upstream = await stub(t);
   const diagnostics: SignInDiagnostic[] = [];
   const registrationCache = new MemoryRegistrationCache();
@@ -787,12 +792,12 @@ test("staged diagnostics distinguish token rejection from missing org and remain
   assert.ok(!JSON.stringify(diagnostics).includes(alice.email));
   assert.ok(!JSON.stringify(diagnostics).includes("https://"));
   upstream.state.tokenError = null;
-  upstream.state.omit = [ORG_CLAIM];
+  upstream.state.userinfoPatch = { [ORG_CLAIM]: "conflicting-org" };
   await rejected(
     await callback(base, await upstreamApproval(await begin(base))),
   );
-  assert.equal(diagnostics.at(-1)?.stage, "missing-org-claim");
-  upstream.state.omit = [];
+  assert.equal(diagnostics.at(-1)?.stage, "org-claim-validation");
+  upstream.state.userinfoPatch = {};
   const valid = await flow(base);
   const calls = upstream.state.tokenCalls;
   await rejected(await callback(base, valid.started));
@@ -1064,11 +1069,11 @@ test("real OIDC maps verified name/email/org/sub and survives callback on anothe
       upstreamIssuer: upstream.issuer,
       identityMode: "openwork",
     }).verifyAccessToken(result.token),
-    alice,
+    { ...alice, identity_issuer: upstream.issuer },
   );
 });
 
-test("two real names and org|sub keys isolate every set and generation without synthetic identity suffixes", async (t) => {
+test("issuer|sub isolates people while organization changes preserve every set and counter", async (t) => {
   const upstream = await stub(t);
   const base = await app(t, upstream.issuer);
   const a = await flow(base);
@@ -1088,9 +1093,16 @@ test("two real names and org|sub keys isolate every set and generation without s
     assert.notDeepEqual(rows(one), rows(three));
     assert.equal(one.generation, 1);
     assert.equal(two.generation, 1);
-    assert.equal(three.generation, 1);
+    assert.equal(three.generation, 2);
+    assert.equal(three.whoami?.fingerprint, one.whoami?.fingerprint);
+    const expected = createPersonalProvider({
+      ...alice,
+      identity_issuer: upstream.issuer,
+    });
+    assert.deepEqual(rows(await expected(widget)), rows(one));
+    assert.deepEqual(rows(await expected(widget)), rows(three));
     const refreshed = await data(base, a.token, widget);
-    assert.equal(refreshed.generation, 2);
+    assert.equal(refreshed.generation, 3);
     assert.notDeepEqual(rows(refreshed), rows(one));
     assert.equal(refreshed.whoami?.name, alice.name);
   }
@@ -1098,7 +1110,91 @@ test("two real names and org|sub keys isolate every set and generation without s
   const renamed = await flow(base);
   const updated = await data(base, renamed.token, "today");
   assert.equal(updated.whoami?.name, "Alice Updated");
-  assert.equal(updated.generation, 3);
+  assert.equal(updated.generation, 4);
+});
+
+test("optional organization absence succeeds with userinfo profile fallback and does not reset identity", async (t) => {
+  const upstream = await stub(t);
+  const base = await app(t, upstream.issuer);
+  const withOrg = await flow(base);
+  const first = await data(base, withOrg.token, "today");
+  assert.equal(decodeJwt(withOrg.token).org_id, alice.org_id);
+  upstream.state.omit = [ORG_CLAIM, "name", "email"];
+  upstream.state.userinfoPatch = { [ORG_CLAIM]: undefined };
+  const noOrg = await flow(base);
+  const claims = decodeJwt(noOrg.token);
+  assert.equal(claims.org_id, null);
+  assert.equal(claims.name, alice.name);
+  assert.equal(claims.email, alice.email);
+  assert.equal(claims.identity_issuer, upstream.issuer);
+  assert.equal(claims.iss, appIssuer);
+  const next = await data(base, noOrg.token, "today");
+  assert.equal(next.generation, 2);
+  assert.equal(next.whoami?.fingerprint, first.whoami?.fingerprint);
+  assert.equal(next.whoami?.identityMode, "openwork");
+  if (next.whoami?.identityMode === "openwork")
+    assert.equal(next.whoami.org_id, null);
+  upstream.state.userinfoPatch = { [ORG_CLAIM]: "profile-org" };
+  assert.equal(decodeJwt((await flow(base)).token).org_id, "profile-org");
+  upstream.state.omit = [];
+  upstream.state.patch = { [ORG_CLAIM]: null };
+  upstream.state.userinfoPatch = { [ORG_CLAIM]: null };
+  assert.equal(decodeJwt((await flow(base)).token).org_id, null);
+  upstream.state.patch = { org_id: "id-org" };
+  upstream.state.userinfoPatch = {};
+  await rejected(
+    await callback(base, await upstreamApproval(await begin(base))),
+  );
+});
+
+test("upstream identity issuer is explicit and pinned; same subject at different issuers has distinct data", async (t) => {
+  const one = await stub(t);
+  const two = await stub(t);
+  const first = await app(t, one.issuer);
+  const second = await app(t, two.issuer);
+  const a = await flow(first);
+  const b = await flow(second);
+  for (const widget of widgetIds) {
+    const left = await data(first, a.token, widget);
+    const right = await data(second, b.token, widget);
+    assert.notEqual(left.whoami?.fingerprint, right.whoami?.fingerprint);
+    assert.notDeepEqual(rows(left), rows(right));
+  }
+  const identity = { identity_issuer: one.issuer, sub: alice.sub };
+  assert.equal(
+    identityKey(identity),
+    fingerprint(JSON.stringify([one.issuer, alice.sub])),
+  );
+  assert.notEqual(
+    identityKey({ identity_issuer: "https://id.example/a|b", sub: "c" }),
+    identityKey({ identity_issuer: "https://id.example/a", sub: "b|c" }),
+  );
+  const oauth = createOAuth({
+    issuer: appIssuer,
+    privateKeyPem,
+    identityMode: "openwork",
+    upstreamIssuer: one.issuer,
+  });
+  await assert.rejects(oauth.verifyAccessToken(b.token));
+  assert.equal((await rpc(first, b.token, definitions[home].tool)).status, 401);
+  const { decodeProtectedHeader } = await import("jose");
+  const originalClaims = decodeJwt(a.token);
+  for (const invalidIssuer of [
+    undefined,
+    "",
+    appIssuer,
+    "https://spoof.example",
+    "x".repeat(2049),
+  ]) {
+    const token = await new SignJWT({
+      ...originalClaims,
+      identity_issuer: invalidIssuer,
+    })
+      .setProtectedHeader({ ...decodeProtectedHeader(a.token), alg: "EdDSA" })
+      .sign(privateKey);
+    await assert.rejects(oauth.verifyAccessToken(token));
+    assert.equal((await rpc(first, token, definitions[home].tool)).status, 401);
+  }
 });
 
 test("bad ID token issuer/audience/signature/nonce/expiry and unbounded/missing identity claims fail closed", async (t) => {
@@ -1126,7 +1222,7 @@ test("bad ID token issuer/audience/signature/nonce/expiry and unbounded/missing 
     await callback(base, await upstreamApproval(await begin(base))),
   );
   upstream.state.wrongSignature = false;
-  for (const claim of ["nonce", "sub", "iss", "aud", "exp", ORG_CLAIM]) {
+  for (const claim of ["nonce", "sub", "iss", "aud", "exp"]) {
     upstream.state.omit = [claim];
     await rejected(
       await callback(base, await upstreamApproval(await begin(base))),

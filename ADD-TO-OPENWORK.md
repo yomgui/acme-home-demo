@@ -28,7 +28,7 @@ Env values win over the encrypted private Blob fallback. Exact issuer and callba
 
 Main ran `scripts/verify-upstream-hosted.mjs` against both stable aliases; the same script is copied here. Public discovery returned **200**, anonymous access **401**, two authorize responses **302** with the same upstream client ID and exact callback. State was five-part JWE; nonce cookie **43 bytes, SameSite=Lax, Secure, Path=/, no Domain**. A **synthetic-invalid-code** callback returned **400** with the safe **Sign-in expired, try again** page. The result is **PARTIAL**, not a successful real-user flow.
 
-Implementation checks: **64/64 Node**, **6/6 browser**. Older 49/5 and exit-2 public-only verifier receipts are historical. No Acme stage-log receipt beyond this probe is asserted. Arbitrary/unknown Den `error_description` phrases are redacted by the conservative whitelist; do not infer a root cause from redaction or from an intentional invalid-code rejection. The original user's valid-code failure remains unconfirmed.
+Implementation checks: **64/64 Node**, **6/6 browser**. Older 49/5 and exit-2 public-only verifier receipts are historical. No Acme stage-log receipt beyond this probe is asserted. Arbitrary/unknown Den `error_description` phrases are redacted by the conservative whitelist; do not infer a root cause from redaction or from an intentional invalid-code rejection. The later audit identified the primary required-org gate as described below; the intentional negative probe did not establish that cause.
 
 **Main completed no real-member consent in the new probe. Guillaume must retry Connect with the updated test connection.** This finalization only copies/formats the script and updates docs; it does not run the probe again.
 
@@ -38,12 +38,20 @@ Real-mode `/mcp` and `/api/mcp` require verified app Bearer auth **before body p
 
 `Mcp-Session-Id` is intentionally absent: the SDK's stateless configuration (`sessionIdGenerator: undefined`) and fresh per-request transports cannot provide meaningful cross-request/serverless sessions. No fake header or per-instance session registry was added. Real-mode `verify-hosted.ts` now checks anonymous MCP 401 and reports INCOMPLETE for missing authenticated proof; the negative `verify-upstream-hosted.mjs` remains unchanged. No alias, issuer, stable env or production change is included.
 
+## Audited identity decision
+
+The primary `missing-org-claim` occurred after valid ID-token verification and subject-matched userinfo. The local fix makes real identity **verified upstream issuer + sub**, explicitly carried as `identity_issuer`, not downstream app JWT `iss`. Access-token validation pins it to configured upstream while preserving the existing app issuer/audience/signature invariants and rejecting Den MCP tokens. Provider/counter keys are full SHA256 of `JSON.stringify([identity_issuer, sub])`: same identity is stable across org changes; different issuers/same sub have different data.
+
+`org_id` is optional nullable metadata, `null` when absent; present non-null bounded claims from verified ID token and matched userinfo must agree. Name/email fallback and name/subshort footer stay unchanged; org is not displayed. Tokens lacking `identity_issuer` require fresh Connect after deployment. No added scopes/resources.
+
+The later 19:59:58Z invalid_grant with cookiePresent=false is likely consumed-code replay, **but same-code reuse is unproven**. The expired-code page remains. This is separate from the required-org gate fixed in local code; deployment and hosted retest remain main-owned.
+
 ## Retry and acceptance
 
 1. Use the updated per-member OAuth DCR Preview test connection with scope `home:read`; do not alter original shared connections or paste a Den MCP bearer token.
 2. Complete login/consent directly in the browser within five minutes. This step has not been validated for a real member on the new alias; do not reuse the probe's synthetic-invalid-code callback.
 3. Authenticated state contains the transaction. The optional cookie is binding-only, 43 ASCII bytes, Lax/Secure/HttpOnly/Path=/ without Domain. Old baseline `67b5a3bf` was already Lax, not Strict. Missing cookie is accepted with valid state and remaining nonce/PKCE/state checks; present malformed/mismatched cookie rejects. No logged-in app session is stored.
-4. On a successful callback, invoke `acme_home {}`, save the App if needed, then Dashboard → Add. Verify real identity and independently refreshed synthetic sets with two real subjects/orgs.
+4. On a successful callback, invoke `acme_home {}`, save the App if needed, then Dashboard → Add. Verify real identity and independently refreshed synthetic sets with two real issuer/sub identities.
 5. A real-code failure still needs request-scoped safe stage/flags and SHA-256 client/redirect fingerprints. Generic error text and unknown-description redaction do not establish a diagnosis; no raw IDs, URLs, tokens or cookies should be logged.
 
 Absent-cookie acceptance drops browser continuity binding, not other OAuth checks; it is not full CSRF/replay protection. Upstream rejects reused authorization codes, downstream hosts validate echoed state, and app redemption checks PKCE. No durable replay registry; downstream codes retain the inherited 60-second replay window with the same verifier. No automatic retry or production-ready claim.

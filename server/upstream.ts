@@ -46,7 +46,8 @@ export const realIdentitySchema = z.object({
   sub: boundedClaim(256),
   name: boundedClaim(256),
   email: boundedClaim(320),
-  org_id: boundedClaim(256),
+  identity_issuer: boundedClaim(2048),
+  org_id: boundedClaim(256).nullable().default(null),
 });
 export type OpenWorkIdentity = z.infer<typeof realIdentitySchema>;
 const downstreamSchema = z
@@ -350,7 +351,7 @@ export function createUpstream(
       "default-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'",
     );
     res.end(
-      '<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Sign-in expired</title></head><body><main><h1>Sign-in expired, try again</h1><p>Return to your app connection and choose Connect to start a new sign-in. This page will not retry automatically.</p></main></body></html>',
+      `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Sign-in expired</title></head><body><main><h1>Sign-in expired, try again</h1><p>Stage: ${diagnosticFor(error, fallback).stage}</p><p>Return to your app connection and choose Connect to start a new sign-in. This page will not retry automatically.</p></main></body></html>`,
     );
   }
   async function begin(res: ServerResponse, downstream: DownstreamRequest) {
@@ -548,19 +549,23 @@ export function createUpstream(
       headers: { Authorization: `Bearer ${tokenPair.accessToken}` },
     });
     if (userinfo.sub !== sub) throw new SignInError("userinfo-subject");
-    if (claims[ORG_CLAIM] === undefined || claims[ORG_CLAIM] === null)
-      throw new SignInError("missing-org-claim");
-    const org = await signInStep("org-claim-validation", () =>
-      boundedClaim(256).parse(claims[ORG_CLAIM]),
-    );
-    if (
-      (userinfo[ORG_CLAIM] !== undefined && userinfo[ORG_CLAIM] !== org) ||
-      (userinfo.org_id !== undefined && userinfo.org_id !== org)
-    )
-      throw new SignInError("org-claim-validation");
+    const org = await signInStep("org-claim-validation", () => {
+      const present = [
+        claims[ORG_CLAIM],
+        claims.org_id,
+        userinfo[ORG_CLAIM],
+        userinfo.org_id,
+      ]
+        .filter((value) => value !== undefined && value !== null)
+        .map((value) => boundedClaim(256).parse(value));
+      if (new Set(present).size > 1)
+        throw new SignInError("org-claim-validation");
+      return present[0] ?? null;
+    });
     const identity = await signInStep("profile-claims", () =>
       realIdentitySchema.parse({
         identityMode: "openwork",
+        identity_issuer: claims.iss,
         sub,
         name: claims.name ?? userinfo.name,
         email: claims.email ?? userinfo.email,
