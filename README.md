@@ -40,6 +40,20 @@ Verified baseline source `67b5a3bf` already emitted **SameSite=Lax**, Secure for
 
 Defaults remain `AUTH_REQUIRED=true`, `IDENTITY_MODE=openwork`, `UPSTREAM_ISSUER=https://app.openworklabs.com/api/auth`. Discovery appends `/.well-known/openid-configuration`. App issuer is explicit `DEMO_AS_ISSUER` or trusted `https://${VERCEL_URL}`; it determines the exact callback and app `/mcp` audience. Request Host/Origin/forwarded headers never establish trust. Existing Ed25519 PKCS8 `DEMO_AS_PRIVATE_KEY` signs downstream JWTs and derives separate state/cache AES-GCM keys through HKDF; runtime never generates a replacement key.
 
+### Real-mode MCP authentication and stateless transport
+
+With `AUTH_REQUIRED=true` and `IDENTITY_MODE=openwork`, **all `/mcp` and `/api/mcp` requests require verified app Bearer authorization before body reading/parsing**, including initialization, tool/resource listings, static UI reads, malformed/unfinished bodies and GET/HEAD/PUT/PATCH/DELETE/OPTIONS. The local HTTP ingress checks before the SDK Express JSON parser. Missing or invalid credentials return 401 and a JSON error; HEAD correctly omits a response body.
+
+```text
+WWW-Authenticate: Bearer realm="OAuth", resource_metadata="https://acme-home-demo-peruser-preview.vercel.app/.well-known/oauth-protected-resource", error="invalid_token", scope="home:read"
+```
+
+OAuth discovery/protected-resource metadata/JWKS remain public. **Real-mode MCP metadata/static resources are not anonymous bootstrap endpoints**: Connect first. Valid app tokens permit initialize/list/read across separate requests. Explicit demo mode retains anonymous MCP metadata bootstrap, and `AUTH_REQUIRED=false` shared behavior is unchanged.
+
+**No `Mcp-Session-Id`:** the installed SDK's stateless mode (`sessionIdGenerator: undefined`) emits no session ID and performs no session validation. A fresh transport handles each request. A fake header or per-instance map cannot provide meaningful serverless cross-request sessions; Bearer auth remains the authority.
+
+The real-mode `scripts/verify-hosted.ts` now requires 401 for anonymous MCP metadata, malformed bodies and non-POST requests, while checking public OAuth discovery 200. INCOMPLETE means authenticated sign-in/host proof is still unperformed. `scripts/verify-upstream-hosted.mjs` is unchanged and compatible. Prior anonymous-bootstrap receipts are historical; this local auth change does not alter aliases/issuer/stable env or perform deployment.
+
 ### Stable upstream client: env first
 
 | Variable                       | Contract                                                                                                    |
@@ -51,7 +65,7 @@ Defaults remain `AUTH_REQUIRED=true`, `IDENTITY_MODE=openwork`, `UPSTREAM_ISSUER
 | `UPSTREAM_CLIENT_SECRET`       | Absent for `none`, required for either secret method; never used to guess auth method                       |
 | `BLOB_READ_WRITE_TOKEN`        | Needed only if no env client is configured and private registration storage is used                         |
 
-Invalid/partial env configuration fails closed and does not fall through to Blob. Absent env client plus absent Blob configuration fails authorization before discovery/DCR, while public app metadata/static UI stays accessible. Public clients use no secret; post puts the secret in the form only; Basic uses form-encoded credentials in the authorization header. Main completed the public-client provisioning and exact stable bindings reported above. No provisioning script was added; the copied negative verifier does not set env values or register new upstream clients.
+Invalid/partial env configuration fails closed and does not fall through to Blob. Absent env client plus absent Blob configuration fails authorization before discovery/DCR, while public OAuth discovery stays accessible; real-mode MCP metadata/static UI remains Bearer-protected. Public clients use no secret; post puts the secret in the form only; Basic uses form-encoded credentials in the authorization header. Main completed the public-client provisioning and exact stable bindings reported above. No provisioning script was added; the copied negative verifier does not set env values or register new upstream clients.
 
 ### Private encrypted cache
 

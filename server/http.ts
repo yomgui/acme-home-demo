@@ -1,3 +1,8 @@
+import {
+  createServer as createHttpServer,
+  type IncomingMessage,
+  type ServerResponse,
+} from "node:http";
 import { createMcpExpressApp } from "@modelcontextprotocol/express";
 import type { McpServer } from "@modelcontextprotocol/server";
 import { createHandler, health, type HandlerOptions } from "./handler.ts";
@@ -45,5 +50,47 @@ export function createHttpApp(
     ],
     (req, res) => handler(req, res),
   );
+  const realMode =
+    (options.authRequired ?? process.env.AUTH_REQUIRED !== "false") &&
+    (options.identityMode ?? process.env.IDENTITY_MODE ?? "openwork") ===
+      "openwork";
+  app.use(
+    (
+      error: unknown,
+      _req: IncomingMessage,
+      res: ServerResponse,
+      next: (error?: unknown) => void,
+    ) => {
+      if (
+        realMode &&
+        error &&
+        typeof error === "object" &&
+        "type" in error &&
+        (error.type === "entity.parse.failed" ||
+          error.type === "entity.too.large")
+      ) {
+        res.statusCode = error.type === "entity.too.large" ? 413 : 400;
+        res.setHeader("Content-Type", "application/json");
+        res.end(JSON.stringify({ error: "Invalid request body" }));
+        return;
+      }
+      next(error);
+    },
+  );
+  const listener = createHttpServer((req, res) => {
+    void handler
+      .preflight(req, res)
+      .then((allowed) => {
+        if (allowed) app(req, res);
+      })
+      .catch(() => {
+        if (!res.headersSent) {
+          res.statusCode = 503;
+          res.setHeader("Content-Type", "application/json");
+          res.end(JSON.stringify({ error: "MCP authentication unavailable" }));
+        }
+      });
+  });
+  app.listen = listener.listen.bind(listener);
   return app;
 }

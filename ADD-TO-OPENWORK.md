@@ -32,6 +32,12 @@ Implementation checks: **64/64 Node**, **6/6 browser**. Older 49/5 and exit-2 pu
 
 **Main completed no real-member consent in the new probe. Guillaume must retry Connect with the updated test connection.** This finalization only copies/formats the script and updates docs; it does not run the probe again.
 
+## Per-server auth policy (local change; deployment remains main-owned)
+
+Real-mode `/mcp` and `/api/mcp` require verified app Bearer auth **before body parsing for every request**, including initialize, tools/list, resources/read, malformed bodies and non-POST methods. Unauthorized requests return 401 JSON with `Bearer realm="OAuth"`, the stable issuer's protected-resource metadata URL and `error="invalid_token"` (scope `home:read`). OAuth discovery is public; real-mode MCP metadata/static UI is not anonymous bootstrap. Connect first. Explicit demo bootstrap and shared mode remain unchanged.
+
+`Mcp-Session-Id` is intentionally absent: the SDK's stateless configuration (`sessionIdGenerator: undefined`) and fresh per-request transports cannot provide meaningful cross-request/serverless sessions. No fake header or per-instance session registry was added. Real-mode `verify-hosted.ts` now checks anonymous MCP 401 and reports INCOMPLETE for missing authenticated proof; the negative `verify-upstream-hosted.mjs` remains unchanged. No alias, issuer, stable env or production change is included.
+
 ## Retry and acceptance
 
 1. Use the updated per-member OAuth DCR Preview test connection with scope `home:read`; do not alter original shared connections or paste a Den MCP bearer token.

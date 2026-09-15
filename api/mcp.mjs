@@ -1790,7 +1790,33 @@ function createHandler(options = {}) {
   const sharedServer = options.sharedServer ?? (() => createServer(shared));
   const providers = /* @__PURE__ */ new Map();
   const instance = randomUUID3();
-  return async (req, res) => {
+  const realMode = oauth?.metadata.authorizationServer.identity_mode === "openwork";
+  function unauthorized(res) {
+    res.statusCode = 401;
+    res.setHeader("Cache-Control", "private, no-store");
+    res.setHeader(
+      "WWW-Authenticate",
+      oauth ? `Bearer realm="OAuth", resource_metadata="${oauth.metadata.authorizationServer.issuer}/.well-known/oauth-protected-resource", error="invalid_token", scope="home:read"` : 'Bearer error="invalid_token"'
+    );
+    res.setHeader("Content-Type", "application/json");
+    res.end(JSON.stringify({ error: "Connect to personalize" }));
+  }
+  async function authenticate(req, res) {
+    try {
+      if (req.headers.authorization !== void 0) {
+        const token = /^Bearer ([A-Za-z0-9._~-]+)$/i.exec(
+          req.headers.authorization
+        )?.[1];
+        if (!token || !oauth) throw new Error("Invalid bearer");
+        return await oauth.verifyAccessToken(token);
+      }
+      if (realMode) throw new Error("Missing bearer");
+    } catch {
+      unauthorized(res);
+    }
+    return void 0;
+  }
+  const handler2 = async (req, res) => {
     res.setHeader("Cache-Control", "private, no-store");
     res.setHeader("X-Content-Type-Options", "nosniff");
     if (oauth && await oauth.handle(req, res)) return;
@@ -1805,28 +1831,8 @@ function createHandler(options = {}) {
       res.end("Not found");
       return;
     }
-    const unauthorized = () => {
-      res.statusCode = 401;
-      res.setHeader(
-        "WWW-Authenticate",
-        oauth ? `Bearer resource_metadata="${oauth.metadata.authorizationServer.issuer}/.well-known/oauth-protected-resource", scope="home:read", error="invalid_token"` : 'Bearer error="invalid_token"'
-      );
-      res.setHeader("Content-Type", "application/json");
-      res.end(JSON.stringify({ error: "Connect to personalize" }));
-    };
-    let identity;
-    if (req.headers.authorization !== void 0) {
-      try {
-        const token = /^Bearer ([A-Za-z0-9._~-]+)$/i.exec(
-          req.headers.authorization
-        )?.[1];
-        if (!token || !oauth) throw new Error("Invalid bearer");
-        identity = await oauth.verifyAccessToken(token);
-      } catch {
-        unauthorized();
-        return;
-      }
-    }
+    const identity = await authenticate(req, res);
+    if (res.writableEnded) return;
     try {
       req.body = await mcpBody(req);
     } catch {
@@ -1836,7 +1842,7 @@ function createHandler(options = {}) {
       return;
     }
     if (required2 && !identity && !publicMetadata(req.body)) {
-      unauthorized();
+      unauthorized(res);
       return;
     }
     if (required2 && req.headers.origin !== void 0) {
@@ -1863,6 +1869,14 @@ function createHandler(options = {}) {
     }
     await handleMcpPost(factory, req, res, req.body);
   };
+  return Object.assign(handler2, {
+    async preflight(req, res) {
+      const path = req.url?.split("?")[0];
+      if (realMode && (path === "/mcp" || path === "/api/mcp"))
+        await authenticate(req, res);
+      return !res.writableEnded;
+    }
+  });
 }
 var configured;
 async function handler(req, res) {

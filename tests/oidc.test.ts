@@ -7,6 +7,7 @@ import {
 } from "node:crypto";
 import {
   createServer,
+  request as httpRequest,
   type IncomingMessage,
   type ServerResponse,
 } from "node:http";
@@ -16,6 +17,8 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { createHandler, type HandlerOptions } from "../server/handler.ts";
 import { createOAuth } from "../server/oauth.ts";
+import { createHttpApp } from "../server/http.ts";
+import { createServer as createMcpServer } from "../server/server.ts";
 import {
   CALLBACK_PATH,
   ORG_CLAIM,
@@ -24,6 +27,7 @@ import {
 } from "../server/upstream.ts";
 import {
   definitions,
+  resourceUri,
   payloadSchema,
   widgetIds,
   type Payload,
@@ -812,6 +816,163 @@ test("missing stable client configuration fails closed without discovery or DCR"
   assert.equal(upstream.state.registrations, 0);
 });
 
+for (const lane of ["raw", "express"] as const) {
+  test(`${lane}: real-mode MCP authenticates every request before body parsing, with public OAuth discovery and no fake session ID`, async (t) => {
+    const upstream = await stub(t);
+    let base: string;
+    if (lane === "raw") base = await app(t, upstream.issuer);
+    else {
+      const listener = createHttpApp(() => createMcpServer(), {
+        issuer: appIssuer,
+        privateKeyPem,
+        identityMode: "openwork",
+        upstreamIssuer: upstream.issuer,
+        upstreamOptions: {
+          env: {},
+          registrationCache: new MemoryRegistrationCache(),
+          diagnostics: () => {},
+        },
+      }).listen(0, "127.0.0.1");
+      await new Promise<void>((resolve) => listener.once("listening", resolve));
+      t.after(async () => {
+        listener.closeAllConnections();
+        await new Promise<void>((resolve) => listener.close(() => resolve()));
+      });
+      const address = listener.address();
+      assert.ok(address && typeof address !== "string");
+      base = `http://127.0.0.1:${address.port}`;
+    }
+    const challenge = `Bearer realm="OAuth", resource_metadata="${appIssuer}/.well-known/oauth-protected-resource", error="invalid_token", scope="home:read"`;
+    for (const path of ["/mcp", "/api/mcp"]) {
+      for (const method of [
+        "GET",
+        "HEAD",
+        "POST",
+        "PUT",
+        "PATCH",
+        "DELETE",
+        "OPTIONS",
+      ]) {
+        for (const token of [undefined, "invalid-fixture-token"]) {
+          const response = await fetch(`${base}${path}`, {
+            method,
+            headers: {
+              "Content-Type": "application/json",
+              "Mcp-Session-Id": "not-authentication",
+              ...(token ? { Authorization: `Bearer ${token}` } : {}),
+            },
+            ...(method === "GET" || method === "HEAD"
+              ? {}
+              : { body: "malformed json" }),
+          });
+          assert.equal(response.status, 401);
+          assert.equal(response.headers.get("www-authenticate"), challenge);
+          assert.match(
+            text(response.headers.get("content-type")),
+            /application\/json/,
+          );
+          if (method !== "HEAD")
+            assert.deepEqual(await response.json(), {
+              error: "Connect to personalize",
+            });
+        }
+      }
+      const requests: { method: string; params: Record<string, unknown> }[] = [
+        {
+          method: "initialize",
+          params: {
+            protocolVersion: "2025-11-25",
+            capabilities: {},
+            clientInfo: { name: "auth-boundary-test", version: "1" },
+          },
+        },
+        { method: "tools/list", params: {} },
+        { method: "resources/list", params: {} },
+        { method: "resources/read", params: { uri: resourceUri(home) } },
+      ];
+      const call = (request: (typeof requests)[number], token?: string) =>
+        fetch(`${base}${path}`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Accept: "application/json, text/event-stream",
+            ...(token ? { Authorization: `Bearer ${token}` } : {}),
+          },
+          body: JSON.stringify({ jsonrpc: "2.0", id: 1, ...request }),
+        });
+      for (const request of requests) {
+        const response = await call(request);
+        assert.equal(response.status, 401);
+        assert.equal(response.headers.get("www-authenticate"), challenge);
+      }
+      await new Promise<void>((resolve, reject) => {
+        const req = httpRequest(
+          `${base}${path}`,
+          {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              "Content-Length": "999",
+            },
+          },
+          (res) => {
+            try {
+              assert.equal(res.statusCode, 401);
+              assert.equal(res.headers["www-authenticate"], challenge);
+              res.resume();
+              req.destroy();
+              resolve();
+            } catch (error) {
+              req.destroy();
+              reject(error);
+            }
+          },
+        );
+        req.on("error", reject);
+        req.setTimeout(3000, () =>
+          req.destroy(new Error("Authentication waited for a body")),
+        );
+        req.flushHeaders();
+      });
+      const valid = await flow(base);
+      for (const request of requests) {
+        const response = await call(request, valid.token);
+        assert.equal(response.status, 200);
+        assert.equal(response.headers.get("mcp-session-id"), null);
+        assert.ok(!record(await response.json()).error);
+      }
+      assert.equal(
+        (
+          await fetch(`${base}${path}`, {
+            headers: { Authorization: `Bearer ${valid.token}` },
+          })
+        ).status,
+        405,
+      );
+      assert.equal(
+        (
+          await fetch(`${base}${path}`, {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              Authorization: `Bearer ${valid.token}`,
+            },
+            body: "malformed",
+          })
+        ).status,
+        400,
+      );
+    }
+    for (const path of [
+      "/.well-known/oauth-authorization-server",
+      "/.well-known/oauth-protected-resource",
+      "/.well-known/oauth-protected-resource/mcp",
+      "/.well-known/jwks.json",
+    ])
+      assert.equal((await fetch(`${base}${path}`)).status, 200);
+  });
+}
+
 test("hosted verifier reports real identity proof incomplete without attempting DCR or sign-in", () => {
   const oauth = createOAuth({
     issuer: appIssuer,
@@ -822,11 +983,14 @@ test("hosted verifier reports real identity proof incomplete without attempting 
   const response = (status: number, value: unknown) => ({
     status,
     headers: new Map([
-      ["www-authenticate", "Bearer resource_metadata=fixture"],
+      [
+        "www-authenticate",
+        `Bearer realm="OAuth", resource_metadata="${appIssuer}/.well-known/oauth-protected-resource", error="invalid_token"`,
+      ],
     ]),
     json: () => value,
   });
-  const result = verifyHosted(appIssuer, (url, options) => {
+  const result = verifyHosted(appIssuer, (url) => {
     const path = new URL(url).pathname;
     called.push(path);
     if (path === "/.well-known/oauth-authorization-server")
@@ -835,19 +999,8 @@ test("hosted verifier reports real identity proof incomplete without attempting 
       return response(200, oauth.metadata.protectedResource);
     if (path === "/.well-known/jwks.json")
       return response(200, oauth.metadata.jwks);
-    assert.equal(path, "/mcp");
-    const request = record(JSON.parse(options?.body ?? "{}"));
-    if (request.method === "tools/call") return response(401, {});
-    if (request.method === "tools/list")
-      return response(200, { result: { tools: Object.values(definitions) } });
-    assert.equal(request.method, "resources/read");
-    return response(200, {
-      result: {
-        contents: [
-          { text: "viewer-identity -generation Connect to personalize" },
-        ],
-      },
-    });
+    assert.ok(path === "/mcp" || path === "/api/mcp");
+    return response(401, { error: "Connect to personalize" });
   });
   assert.equal(result.status, "INCOMPLETE");
   assert.equal(result.flows, 0);

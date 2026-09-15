@@ -147,6 +147,46 @@ export function verifyHosted(
     check(!result.isError);
     return result;
   }
+  if (metadata.identity_mode === "openwork") {
+    const challenge = `Bearer realm="OAuth", resource_metadata="${base}/.well-known/oauth-protected-resource", error="invalid_token"`;
+    const blocked = (response: ReturnType<typeof http>) => {
+      check(response.status === 401);
+      check(response.headers.get("www-authenticate")?.startsWith(challenge));
+      check(typeof record(response.json()).error === "string");
+    };
+    for (const method of [
+      "initialize",
+      "tools/list",
+      "resources/list",
+      "resources/templates/list",
+      "resources/read",
+      "tools/call",
+    ])
+      blocked(
+        request(
+          undefined,
+          method,
+          method === "resources/read" ? { uri: resourceUri("home") } : {},
+        ),
+      );
+    for (const path of ["/mcp", "/api/mcp"]) {
+      for (const method of ["GET", "DELETE", "OPTIONS"])
+        blocked(http(`${base}${path}`, { method }));
+      blocked(
+        http(`${base}${path}`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: "malformed",
+        }),
+      );
+    }
+    return {
+      status: "INCOMPLETE",
+      flows: 0,
+      checks:
+        "Public OAuth discovery passed; every tested anonymous MCP request rejected with 401 before body parsing. Authenticated sign-in and host proof remain unproved; no registration or authorization attempted.",
+    };
+  }
   const publicTools = rpc(undefined, "tools/list").tools;
   check(Array.isArray(publicTools) && publicTools.length === 4);
   for (const view of [...widgetIds, "home"] as const) {
@@ -169,13 +209,6 @@ export function verifyHosted(
         html.includes("Connect to personalize"),
     );
   }
-  if (metadata.identity_mode === "openwork")
-    return {
-      status: "INCOMPLETE",
-      flows: 0,
-      checks:
-        "Public discovery/static UI and anonymous data rejection passed; real OIDC sign-in and two-member host proof require the browser. No registration or authorization attempted.",
-    };
   function authorize() {
     const redirect = "http://127.0.0.1:4321/home-demo-proof";
     const verifier = randomBytes(32).toString("base64url");
