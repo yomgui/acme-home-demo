@@ -7,13 +7,13 @@
 3. In Dashboard → Add app, add **Acme Home** (Run automatically). The other three cards—**Today at a Glance**, **Needs Your Attention**, **My Goals**—are optional standalone widgets; do not add them for the combined demo. Panels refresh independently; the greeting has no employee name.
 4. Workspace-local MCPs may not appear in a shared dashboard picker; use a Cloud connection for sharing. Grant only intended people access, not org-wide by default.
 
-## Per-user — planned, not deployed here
+## Per-user production
 
 Target: `https://acme-home-demo-peruser.vercel.app/mcp`, explicit `IDENTITY_MODE=openwork`. Leave shared production unchanged.
 
-**Prerequisite:** the pinned upstream client is registered for the OLD callback `https://acme-home-demo-peruser-preview.vercel.app/oauth/upstream/callback`. Obtain authorization to update or replace that provider registration for `https://acme-home-demo-peruser.vercel.app/oauth/upstream/callback`. **An env rewrite alone cannot change the registered callback.** Then align app issuer, stable signing key and exact upstream client/issuer/callback/auth-method env bindings. Hosting/protection changes also require authorization; see [README.md](README.md).
+Connection values: **OAuth DCR**, **Individual accounts / per_member**, scope **`home:read`**, issuer **`https://acme-home-demo-peruser.vercel.app`**. Authorization server metadata: `https://acme-home-demo-peruser.vercel.app/.well-known/oauth-authorization-server`. The separately pinned upstream public client uses **`https://acme-home-demo-peruser.vercel.app/oauth/upstream/callback`**, auth method `none`, scopes `openid profile email`. No client secret to enter. Never reuse an old callback or client registration.
 
-After authorized deployment:
+The new project uses its own sensitive Ed25519 signing key; existing Preview registration/env/key remain unchanged. Fresh Connect:
 
 1. Add a separate OAuth DCR connection, scope `home:read`. Den may request code + refresh grants; the app returns code-only, `client_id` ≤512, no refresh token.
 2. Anonymous **initialize returns 401 before body parsing**, like every other MCP request; OAuth discovery stays public. Complete fresh Connect/login/consent before listing/calling tools. Never paste a Den MCP token. `AUTH_REQUIRED=false` cannot bypass this mode.

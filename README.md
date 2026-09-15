@@ -3,7 +3,7 @@
 One codebase, synthetic work data, two public modes:
 
 - **Shared production:** `https://acme-home-demo.vercel.app/mcp`. `IDENTITY_MODE=shared` is the default: no key/account/auth configuration; anonymous initialize, listings, resources and calls. “Good morning/afternoon/evening!” uses the viewer's timezone with no name.
-- **Planned per-user:** `https://acme-home-demo-peruser.vercel.app/mcp`, explicit `IDENTITY_MODE=openwork`. **Not deployed or verified by this change.**
+- **Per-user production:** `https://acme-home-demo-peruser.vercel.app/mcp`, explicit `IDENTITY_MODE=openwork`, separate `prologe/acme-home-demo-peruser` project from the same source. Hosted protocol checks passed; real-member Connect remains the operator's acceptance step.
 
 `acme_home {}` launches `ui://acme-home/home.html` without a provider call. Each panel calls that same tool with `{widget: "today" | "attention" | "goals"}`. Standalone `acme_today`, `acme_attention`, `acme_goals` use `{}` and matching resources. Cross-resource calls reject; independent home panels share one permission scope. Standard MCP Apps, not HTML imports or Cloud Artifacts.
 
@@ -30,12 +30,12 @@ Vercel uses `vercel.json`: Node 24.x, frozen-lockfile installation, `pnpm build`
 
 OpenWork mode requires:
 
-- `DEMO_AS_ISSUER`: exact HTTPS app origin, no trailing slash; planned `https://acme-home-demo-peruser.vercel.app`. Trusted `VERCEL_URL` is only a fallback; request headers never choose trust.
+- `DEMO_AS_ISSUER`: exact HTTPS app origin, no trailing slash; `https://acme-home-demo-peruser.vercel.app`. Trusted `VERCEL_URL` is only a fallback; request headers never choose trust.
 - `DEMO_AS_PRIVATE_KEY`: stable Ed25519 PKCS8 PEM; runtime never generates replacements. Separate HKDF contexts derive AES-GCM state/cache keys.
 - `UPSTREAM_ISSUER`: defaults to `https://app.openworklabs.com/api/auth`.
 - `UPSTREAM_CLIENT_ID`, `UPSTREAM_CLIENT_ISSUER`, `UPSTREAM_CLIENT_REDIRECT_URI`: registered client and exact issuer/callback bindings. `UPSTREAM_CLIENT_AUTH_METHOD=none` for the pinned public client, no secret. Explicit `client_secret_post`/`client_secret_basic` require matching registration and `UPSTREAM_CLIENT_SECRET`.
 
-**Pinned registration still uses the OLD callback:** `https://acme-home-demo-peruser-preview.vercel.app/oauth/upstream/callback`. The new `https://acme-home-demo-peruser.vercel.app/oauth/upstream/callback` needs an **authorized provider-side registration update or replacement**, then matching env bindings and fresh Connect. An env rewrite cannot update provider registration.
+The per-user project's production public client is pinned to `https://acme-home-demo-peruser.vercel.app/oauth/upstream/callback`, with a new independent Ed25519 signing key stored as a sensitive env value. The operator alias `UPSTREAM_REDIRECT_URI` is also pinned, but runtime reads **`UPSTREAM_CLIENT_REDIRECT_URI`**. Existing `acme-home-demo` Preview registration/env/key and its `acme-home-demo-peruser-preview.vercel.app` alias remain untouched. A future callback change needs provider registration plus matching env and fresh Connect—not just an env rewrite.
 
 Env configuration wins; partial/invalid bindings fail closed. Without an env client, `BLOB_READ_WRITE_TOKEN` enables private encrypted registration caching by exact issuer/callback: uncached reads, create without overwrite, then read the durable winner. First-use races may leave orphan registrations; no distributed lock. Callback never registers; corruption/read/write errors never silently rotate or fall back.
 
@@ -51,6 +51,6 @@ Env configuration wins; partial/invalid bindings fail closed. Without an env cli
 
 ## Checks and revert
 
-`pnpm check` runs typecheck, Prettier lint, build, Node tests and Playwright. `pnpm preview` uses a test-only SDK bridge on port 4329 (must be free). Local OIDC/cache fixtures and failure-only traces are not real-member host proof. Main owns dependencies, rebuilding adapters and full verification; historical pass counts do not validate this revision. Live verification scripts are active OAuth probes requiring separate authorization.
+`pnpm check` runs typecheck, Prettier lint, build, Node tests and Playwright. `pnpm preview` uses a test-only SDK bridge on port 4329 (must be free). Local OIDC/cache fixtures and failure-only traces are not real-member host proof. Consolidation source `3b335ed`: typecheck/lint/build, 78 Node and 13 browser tests passed locally. Betterleaks source/history: zero with the exact two invalid-credential-URI test fixtures allowlisted in `.betterleaks.toml`; built resources: zero unfiltered. Name/history audit found no customer references. Live verification scripts are active OAuth probes requiring separate authorization.
 
 Keep shared production and its connector unchanged. Roll back only the separately authorized per-user deployment with its matching prior issuer/client/callback/key configuration, then reconnect; do not rotate keys casually. Deliberate anonymous mode is `IDENTITY_MODE=shared`, not `AUTH_REQUIRED=false`. See [ADD-TO-OPENWORK.md](ADD-TO-OPENWORK.md).
