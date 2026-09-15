@@ -29,7 +29,7 @@ async function fixture(
   provider: WidgetProvider = createSyntheticProvider(),
 ) {
   const listener = createHttpApp(() => createServer(provider), {
-    authRequired: false,
+    identityMode: "shared",
   }).listen(0, "127.0.0.1");
   await once(listener, "listening");
   const address = listener.address();
@@ -284,6 +284,15 @@ test("unknown tools and resources are rejected", async (t) => {
     () => client.callTool({ name: "refresh_everything", arguments: {} }),
     /not found/,
   );
+  assert.equal(
+    (
+      await client.callTool({
+        name: definitions.today.tool,
+        arguments: { accountId: "not-supported" },
+      })
+    ).isError,
+    true,
+  );
   await assert.rejects(() =>
     client.readResource({ uri: "ui://acme-home/private.html" }),
   );
@@ -355,6 +364,42 @@ test("stdio exposes the same launch contract without depending on HTTP", async (
         name: "acme_home",
         arguments: { widget: "today" },
       }),
+    ).kind,
+    "today",
+  );
+  assert.equal(
+    parseResult(
+      "today",
+      await client.callTool({ name: definitions.today.tool, arguments: {} }),
+    ).kind,
+    "today",
+  );
+});
+
+test("existing-server example adds only one widget and preserves its ping tool", async (t) => {
+  const client = new Client({ name: "extension-test", version: "1" });
+  const transport = new StdioClientTransport({
+    command: process.execPath,
+    args: ["--import", "tsx", "examples/extend-your-server.ts"],
+    cwd: process.cwd(),
+    stderr: "pipe",
+  });
+  t.after(() => client.close());
+  await client.connect(transport);
+  assert.deepEqual(
+    (await client.listTools()).tools.map((tool) => tool.name).sort(),
+    ["acme_today", "ping"],
+  );
+  assert.deepEqual(
+    (await client.listResources()).resources.map((resource) => resource.uri),
+    [resourceUri("today")],
+  );
+  const result = await client.callTool({ name: "ping", arguments: {} });
+  assert.match(JSON.stringify(result.content), /Existing tool still works/);
+  assert.equal(
+    parseResult(
+      "today",
+      await client.callTool({ name: definitions.today.tool, arguments: {} }),
     ).kind,
     "today",
   );

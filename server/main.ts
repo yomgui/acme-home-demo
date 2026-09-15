@@ -2,9 +2,12 @@ import { StdioServerTransport } from "@modelcontextprotocol/server/stdio";
 import { createServer } from "./server.ts";
 import { createSyntheticProvider } from "./provider.ts";
 import { createHttpApp, resolvePort } from "./http.ts";
+import { resolveIdentityMode } from "./identity-mode.ts";
 
 const provider = createSyntheticProvider();
 if (process.argv.includes("--stdio")) {
+  if (resolveIdentityMode() !== "shared")
+    throw new Error("Stdio supports shared mode only; use HTTP for identity");
   const server = createServer(provider);
   await server.connect(new StdioServerTransport());
 } else {

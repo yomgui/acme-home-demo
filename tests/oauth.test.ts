@@ -67,8 +67,7 @@ async function harness(
   const options: HandlerOptions = {
     issuer: configuredIssuer,
     privateKeyPem,
-    authRequired,
-    identityMode: "demo",
+    identityMode: authRequired ? "demo" : "shared",
   };
   const handler = createHandler(options);
   const server = express
@@ -629,7 +628,7 @@ test("two verified subjects have different names and all three sets; Refresh cha
   assert.deepEqual(reset.whoami, snapshots[0]?.whoami);
 });
 
-test("trusted preview issuer fallback, explicit override, secure default and explicit shared mode", async (t) => {
+test("trusted preview issuer fallback, explicit override and shared mode without signing configuration", async (t) => {
   const original = {
     issuer: process.env.DEMO_AS_ISSUER,
     preview: process.env.VERCEL_URL,
@@ -660,7 +659,9 @@ test("trusted preview issuer fallback, explicit override, secure default and exp
       .authorizationServer.issuer,
     issuer,
   );
-  assert.throws(() => createHandler({ privateKeyPem: "invalid" }));
+  assert.throws(() =>
+    createHandler({ identityMode: "openwork", privateKeyPem: "invalid" }),
+  );
   process.env.DEMO_AS_ISSUER = "https://explicit.example.test";
   assert.equal(
     createOAuth({ identityMode: "demo", privateKeyPem }).metadata
@@ -702,7 +703,12 @@ test("trusted preview issuer fallback, explicit override, secure default and exp
   );
   assert.equal((await rpc(base, "tools/list", {}, "arbitrary")).status, 401);
   process.env.AUTH_REQUIRED = "false";
-  assert.doesNotThrow(() => createHandler({ privateKeyPem: "invalid" }));
+  assert.doesNotThrow(() =>
+    createHandler({ identityMode: "shared", privateKeyPem: "invalid" }),
+  );
+  assert.throws(() =>
+    createHandler({ identityMode: "openwork", privateKeyPem: "invalid" }),
+  );
 });
 
 test("local Express adapter executes the same OAuth form exchange and verified MCP boundary", async (t) => {

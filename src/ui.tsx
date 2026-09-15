@@ -445,7 +445,8 @@ export function Dashboard({
           <span className="avatar">{identity?.avatar ?? "D"}</span>
           <div>
             <span data-testid="viewer-identity">
-              {identity?.name ?? "Connect to personalize"}
+              {identity?.name ??
+                (needsConnection ? "Connect to personalize" : "Shared demo")}
             </span>
             <small>{identity?.role ?? "Fictional employee"}</small>
           </div>
@@ -470,8 +471,12 @@ export function Dashboard({
           <span className="live-dot" />
           SYNTHETIC DEMO{" "}
           <span>
-            Independent MCP Apps · synthetic work data, connected-provider
-            identity
+            Independent MCP Apps · synthetic work data ·{" "}
+            {identity?.identityMode === "openwork"
+              ? "verified OpenWork identity"
+              : identity
+                ? "test identity"
+                : "no connected identity"}
           </span>
         </div>
         {connectionError && (

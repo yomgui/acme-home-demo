@@ -1480,7 +1480,7 @@ test("app MCP rejects upstream ID/access/MCP tokens and demo identities even wit
   }
 });
 
-test("default identity mode is openwork; real DOM shows name/subshort and auth loss removes identity", async (t) => {
+test("explicit openwork identity shows name/subshort and auth loss removes identity", async (t) => {
   const originalName = process.env.DEMO_VIEWER_NAME;
   process.env.DEMO_VIEWER_NAME = "Wrong Demo Name";
   t.after(() => {
@@ -1494,14 +1494,15 @@ test("default identity mode is openwork; real DOM shows name/subshort and auth l
     else process.env.IDENTITY_MODE = before;
   });
   assert.equal(
-    createOAuth({ issuer: appIssuer, privateKeyPem }).metadata
-      .authorizationServer.identity_mode,
+    createOAuth({ identityMode: "openwork", issuer: appIssuer, privateKeyPem })
+      .metadata.authorizationServer.identity_mode,
     "openwork",
   );
   assert.throws(() =>
     createOAuth({
       issuer: appIssuer,
       privateKeyPem,
+      identityMode: "openwork",
       upstreamIssuer: "http://wrong.invalid",
     }),
   );
@@ -1538,4 +1539,25 @@ test("default identity mode is openwork; real DOM shows name/subshort and auth l
   );
   assert.ok(!blocked.includes(alice.name));
   assert.ok(blocked.includes("Connect to personalize"));
+});
+
+test("legacy AUTH_REQUIRED=false cannot bypass explicit openwork or replace verified identity", async (t) => {
+  const previous = process.env.AUTH_REQUIRED;
+  process.env.AUTH_REQUIRED = "false";
+  t.after(() => {
+    if (previous === undefined) delete process.env.AUTH_REQUIRED;
+    else process.env.AUTH_REQUIRED = previous;
+  });
+  const upstream = await stub(t);
+  const base = await app(t, upstream.issuer);
+  assert.equal((await rpc(base, undefined, definitions.home.tool)).status, 401);
+  assert.equal(
+    (await rpc(base, "unverified", definitions.home.tool)).status,
+    401,
+  );
+  const verified = await flow(base);
+  const result = await data(base, verified.token, "today");
+  assert.equal(result.whoami?.identityMode, "openwork");
+  assert.equal(result.whoami?.name, alice.name);
+  assert.equal(upstream.state.tokenCalls, 1);
 });

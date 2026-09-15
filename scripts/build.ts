@@ -25,8 +25,17 @@ for (const id of [...widgetIds, "home"] as const) {
   const script = result.outputFiles[0]?.text;
   if (!script) throw new Error("Bundle missing");
   const html = `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>${definitions[id].title}</title><style>${css}</style></head><body><div id="root"></div><script type="module">${script.replaceAll("</script", "<\\/script")}</script></body></html>`;
-  if (Buffer.byteLength(html) > 768 * 1024)
-    throw new Error(`${id}: resource exceeds 768 KiB budget`);
+  if (Buffer.byteLength(html) > 768 * 1024) {
+    console.error(
+      Object.values(result.metafile.outputs)
+        .flatMap((output) => Object.entries(output.inputs))
+        .sort((a, b) => b[1].bytesInOutput - a[1].bytesInOutput)
+        .slice(0, 12),
+    );
+    throw new Error(
+      `${id}: ${Math.round(Buffer.byteLength(html) / 1024)} KiB exceeds 768 KiB resource budget`,
+    );
+  }
   await writeFile(new URL(`${id}.html`, out), html);
   console.log(`${id}.html: ${Math.round(Buffer.byteLength(html) / 1024)} KiB`);
 }

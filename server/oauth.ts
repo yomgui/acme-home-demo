@@ -23,7 +23,7 @@ import {
 export type OAuthOptions = {
   issuer?: string;
   privateKeyPem?: string;
-  identityMode?: "openwork" | "demo";
+  identityMode: "openwork" | "demo";
   upstreamIssuer?: string;
   upstreamOptions?: UpstreamOptions;
 };
@@ -176,7 +176,7 @@ function json(res: ServerResponse, status: number, body: unknown) {
   res.setHeader("Content-Type", "application/json; charset=utf-8");
   res.end(JSON.stringify(body));
 }
-export function createOAuth(options: OAuthOptions = {}) {
+export function createOAuth(options: OAuthOptions) {
   const configuredIssuer =
     options.issuer ??
     process.env.DEMO_AS_ISSUER ??
@@ -198,8 +198,7 @@ export function createOAuth(options: OAuthOptions = {}) {
       throw new Error("DEMO_AS_PRIVATE_KEY must be an Ed25519 PKCS8 PEM");
     }
   })();
-  const identityMode =
-    options.identityMode ?? process.env.IDENTITY_MODE ?? "openwork";
+  const identityMode = options.identityMode;
   if (identityMode !== "openwork" && identityMode !== "demo")
     throw new Error("IDENTITY_MODE must be openwork or demo");
   const configuredUpstreamIssuer =

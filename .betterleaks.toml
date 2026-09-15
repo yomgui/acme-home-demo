@@ -1,0 +1,12 @@
+[extend]
+useDefault = true
+
+# Negative SSRF/DCR tests: these two literal example-domain credentials are
+# intentionally invalid fixtures, never service credentials. Keep the path and
+# complete fixture match together so no other URI or credential is suppressed.
+[[allowlists]]
+description = "Two invalid credential-URI fixtures in authorization rejection tests"
+condition = "AND"
+paths = ['''^tests/(oauth|oidc)\.test\.ts$''']
+regexTarget = "match"
+regexes = ['''https://user:fixture@client\.test/cb''', '''https://user:pass@example\.test/oidc''']

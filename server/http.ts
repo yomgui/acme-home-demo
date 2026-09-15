@@ -50,10 +50,7 @@ export function createHttpApp(
     ],
     (req, res) => handler(req, res),
   );
-  const realMode =
-    (options.authRequired ?? process.env.AUTH_REQUIRED !== "false") &&
-    (options.identityMode ?? process.env.IDENTITY_MODE ?? "openwork") ===
-      "openwork";
+  const realMode = handler.identityMode === "openwork";
   app.use(
     (
       error: unknown,

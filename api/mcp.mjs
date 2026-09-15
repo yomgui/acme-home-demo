@@ -984,7 +984,7 @@ function json(res, status, body) {
   res.setHeader("Content-Type", "application/json; charset=utf-8");
   res.end(JSON.stringify(body));
 }
-function createOAuth(options = {}) {
+function createOAuth(options) {
   const configuredIssuer = options.issuer ?? process.env.DEMO_AS_ISSUER ?? (process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : void 0);
   const pem = options.privateKeyPem ?? process.env.DEMO_AS_PRIVATE_KEY;
   if (!configuredIssuer || !validIssuer(configuredIssuer))
@@ -1003,7 +1003,7 @@ function createOAuth(options = {}) {
       throw new Error("DEMO_AS_PRIVATE_KEY must be an Ed25519 PKCS8 PEM");
     }
   })();
-  const identityMode = options.identityMode ?? process.env.IDENTITY_MODE ?? "openwork";
+  const identityMode = options.identityMode;
   if (identityMode !== "openwork" && identityMode !== "demo")
     throw new Error("IDENTITY_MODE must be openwork or demo");
   const configuredUpstreamIssuer = options.upstreamIssuer ?? process.env.UPSTREAM_ISSUER ?? DEFAULT_UPSTREAM_ISSUER;
@@ -1755,6 +1755,15 @@ function createServer(provider = createSyntheticProvider(), loadHtml = loadBuilt
   return server;
 }
 
+// server/identity-mode.ts
+function resolveIdentityMode(value = process.env.IDENTITY_MODE ?? "shared") {
+  if (value !== "shared" && value !== "openwork" && value !== "demo")
+    throw new Error(
+      "IDENTITY_MODE must be shared or openwork (demo is test-only)"
+    );
+  return value;
+}
+
 // server/handler.ts
 var health = { ok: true, demo: true };
 function isRecord2(value) {
@@ -1800,13 +1809,14 @@ function publicMetadata(body) {
   );
 }
 function createHandler(options = {}) {
-  const required2 = options.authRequired ?? process.env.AUTH_REQUIRED !== "false";
-  const oauth = required2 ? createOAuth(options) : void 0;
+  const identityMode = resolveIdentityMode(options.identityMode);
+  const required2 = identityMode !== "shared";
+  const oauth = identityMode === "shared" ? void 0 : createOAuth({ ...options, identityMode });
   const shared = createSyntheticProvider();
   const sharedServer = options.sharedServer ?? (() => createServer(shared));
   const providers = /* @__PURE__ */ new Map();
   const instance = randomUUID3();
-  const realMode = oauth?.metadata.authorizationServer.identity_mode === "openwork";
+  const realMode = identityMode === "openwork";
   function unauthorized(res) {
     res.statusCode = 401;
     res.setHeader("Cache-Control", "private, no-store");
@@ -1886,6 +1896,7 @@ function createHandler(options = {}) {
     await handleMcpPost(factory, req, res, req.body);
   };
   return Object.assign(handler2, {
+    identityMode,
     async preflight(req, res) {
       const path = req.url?.split("?")[0];
       if (realMode && (path === "/mcp" || path === "/api/mcp"))

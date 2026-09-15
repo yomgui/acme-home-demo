@@ -9,7 +9,7 @@ import { handleMcpPost } from "../server/handler.ts";
 
 const provider = createSyntheticProvider();
 const app = createHttpApp(() => createServer(provider), {
-  authRequired: false,
+  identityMode: "shared",
 });
 for (const member of ["a", "b"]) {
   const personal = createPersonalProvider(`ui-fixture-${member}`);

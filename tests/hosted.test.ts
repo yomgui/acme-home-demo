@@ -19,12 +19,20 @@ const mcpUrl = new URL("../api/mcp.mjs", import.meta.url);
 const healthUrl = new URL("../api/healthz.mjs", import.meta.url);
 
 test("generated hosted adapters serve health and the exact MCP launch/resource contract", async (t) => {
-  const previousAuth = process.env.AUTH_REQUIRED;
-  process.env.AUTH_REQUIRED = "false";
-  t.after(() => {
-    if (previousAuth === undefined) delete process.env.AUTH_REQUIRED;
-    else process.env.AUTH_REQUIRED = previousAuth;
-  });
+  for (const key of [
+    "IDENTITY_MODE",
+    "AUTH_REQUIRED",
+    "DEMO_AS_ISSUER",
+    "DEMO_AS_PRIVATE_KEY",
+    "VERCEL_URL",
+  ]) {
+    const previous = process.env[key];
+    delete process.env[key];
+    t.after(() => {
+      if (previous === undefined) delete process.env[key];
+      else process.env[key] = previous;
+    });
+  }
   const mcp = await import(mcpUrl.href);
   const health = await import(healthUrl.href);
   assert.equal(typeof mcp.default, "function");
@@ -145,4 +153,8 @@ test("Vercel packaging includes resources, external dependencies and a neutral s
   assert.ok(landing.includes('{"name":"acme_home","arguments":{}}'));
   assert.ok(landing.includes("ui://acme-home/home.html"));
   assert.ok(!landing.includes("<script"));
+  assert.equal(
+    await readFile(new URL("../public/robots.txt", import.meta.url), "utf8"),
+    "User-agent: *\nDisallow: /\n",
+  );
 });

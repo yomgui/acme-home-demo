@@ -10,7 +10,7 @@ export default defineConfig({
   use: {
     baseURL: "http://127.0.0.1:4329",
     viewport: { width: 1454, height: 876 },
-    trace: "off",
+    trace: { mode: "retain-on-failure", screenshots: false },
   },
   webServer: {
     command: "pnpm exec tsx tests/host.ts",

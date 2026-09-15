@@ -12,6 +12,7 @@
     "serve": "tsx server/main.ts",
     "serve:stdio": "tsx server/main.ts --stdio",
     "preview": "tsx tests/host.ts",
+    "example": "tsx examples/extend-your-server.ts",
     "test": "tsx --test tests/*.test.ts",
     "test:ui": "PLAYWRIGHT_BROWSERS_PATH=0 playwright test",
     "test:ui:install": "PLAYWRIGHT_BROWSERS_PATH=0 playwright install chromium",

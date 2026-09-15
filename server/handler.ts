@@ -17,10 +17,11 @@ import {
   type WidgetProvider,
 } from "./provider.ts";
 import { createServer } from "./server.ts";
+import { resolveIdentityMode, type IdentityMode } from "./identity-mode.ts";
 
 export const health = { ok: true, demo: true } as const;
-export type HandlerOptions = OAuthOptions & {
-  authRequired?: boolean;
+export type HandlerOptions = Omit<OAuthOptions, "identityMode"> & {
+  identityMode?: IdentityMode;
   sharedServer?: () => McpServer;
 };
 
@@ -73,15 +74,17 @@ function publicMetadata(body: unknown): boolean {
   );
 }
 export function createHandler(options: HandlerOptions = {}) {
-  const required =
-    options.authRequired ?? process.env.AUTH_REQUIRED !== "false";
-  const oauth = required ? createOAuth(options) : undefined;
+  const identityMode = resolveIdentityMode(options.identityMode);
+  const required = identityMode !== "shared";
+  const oauth =
+    identityMode === "shared"
+      ? undefined
+      : createOAuth({ ...options, identityMode });
   const shared = createSyntheticProvider();
   const sharedServer = options.sharedServer ?? (() => createServer(shared));
   const providers = new Map<string, WidgetProvider>();
   const instance = randomUUID();
-  const realMode =
-    oauth?.metadata.authorizationServer.identity_mode === "openwork";
+  const realMode = identityMode === "openwork";
   function unauthorized(res: ServerResponse) {
     res.statusCode = 401;
     res.setHeader("Cache-Control", "private, no-store");
@@ -167,6 +170,7 @@ export function createHandler(options: HandlerOptions = {}) {
     await handleMcpPost(factory, req, res, req.body);
   };
   return Object.assign(handler, {
+    identityMode,
     async preflight(req: OAuthRequest, res: ServerResponse) {
       const path = req.url?.split("?")[0];
       if (realMode && (path === "/mcp" || path === "/api/mcp"))
