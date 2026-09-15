@@ -27,6 +27,7 @@
     "@modelcontextprotocol/ext-apps": "2.0.0",
     "@modelcontextprotocol/node": "2.0.0",
     "@modelcontextprotocol/server": "2.0.0",
+    "@vercel/blob": "^2.8.0",
     "jose": "^6.2.12",
     "react": "19.2.0",
     "react-dom": "19.2.0",

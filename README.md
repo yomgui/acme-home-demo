@@ -1,88 +1,114 @@
 # Acme Home
 
-Employee-home MCP App with real OpenWork identity and synthetic work data. `acme_home {}` launches a layout; `acme_home {widget: "today" | "attention" | "goals"}` fetches exactly one independent panel. Standalone tools: `acme_today`, `acme_attention`, `acme_goals`. Resources: `ui://acme-home/{home,today,attention,goals}.html`.
+Real OpenWork identity with synthetic work data. `acme_home {}` launches the layout; `{widget: "today" | "attention" | "goals"}` fetches one independent panel through the same resource-bound tool. Standalone tools: `acme_today`, `acme_attention`, `acme_goals`. Resources: `ui://acme-home/{home,today,attention,goals}.html`. No customer writes.
 
-## Current preview and verification — main-reported handoff
+## Current stable Preview — main-reported handoff
 
-- Reachable real-mode preview: `https://acme-home-demo-loo267kwv-prologe.vercel.app`; MCP: `https://acme-home-demo-loo267kwv-prologe.vercel.app/mcp`.
-- Main disabled Acme preview protection with **DIRECT Guillaume approval**. The earlier protected-preview blocker is historical, not the current reachability status.
-- Main generated keys in memory and piped them into the Vercel **preview** environment, with no secret files. Each deployment trusts its own `VERCEL_URL` as app issuer; default real identity mode and the hosted upstream issuer are used.
-- Original production remains untouched: `https://acme-home-demo.vercel.app/mcp` is the concrete shared-demo revert URL. Keep the existing production/shared experiment connector unchanged; use a new per-member OAuth connection for this preview. Promotion/merge is a separate decision.
+- Connection URL: **`https://acme-home-demo-peruser-preview.vercel.app/mcp`**.
+- App issuer (`DEMO_AS_ISSUER`): **`https://acme-home-demo-peruser-preview.vercel.app`**.
+- Exact upstream callback (`UPSTREAM_CLIENT_REDIRECT_URI`): **`https://acme-home-demo-peruser-preview.vercel.app/oauth/upstream/callback`**.
+- Underlying live **Preview** deployment: `https://acme-home-demo-ko19xur8p-prologe.vercel.app` (receipt only; use the stable alias for connection and issuer).
+- Main provisioned **one public Den DCR client per project**, saving its client ID and exact bindings through Vercel subprocess stdin. `UPSTREAM_CLIENT_ISSUER=https://app.openworklabs.com/api/auth`; registered auth method is `none` (`UPSTREAM_CLIENT_AUTH_METHOD=none`). **No client secret was issued**; client ID values are omitted from these docs.
+- Explicit `DEMO_AS_ISSUER` pins the stable alias. Vercel refused the old generated deployment URL as an alias (`chosen alias ... is a deployment URL`). The **per-user Preview test connection needs a one-time URL + issuer update and fresh Connect**. Original production and existing shared experiment connectors stay unchanged.
 
-| Check           | Reported result and scope                                                                                                                                                                 |
-| --------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Node tests      | Previous implementation run: **49/49 passed**                                                                                                                                             |
-| Browser suite   | Main's later run: **5/5 passed**; earlier missing-Chromium blocker is superseded                                                                                                          |
-| Betterleaks     | **0 findings in source + bundles with the supplied configuration**; the full dependency-tree scan reported **22 third-party fixture findings**, not a whole-directory zero finding result |
-| Hosted verifier | Public metadata, static UI and anonymous data **401** checks passed; **exit 2 / INCOMPLETE**, with no consent flows or resolved real names verified                                       |
+### Verification receipts and remaining user action
 
-Real hosted browser acceptance remains blocked by the absence of a session browser tab, not by preview protection or endpoint reachability. User manual sign-in has been requested. Login/consent, resolved names and two-member hosted isolation remain unverified. These are main's supplied results; this documentation cleanup does not rerun deployments or those tests.
+| Check                             | Result and scope                                                                                                                                                                                              |
+| --------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Local Node suite                  | **64/64 passed**, previous implementation verification                                                                                                                                                        |
+| Local browser suite               | **6/6 passed**, previous implementation verification                                                                                                                                                          |
+| Main's stable-alias live probe    | Public discovery **200**, anonymous **401**, two authorize **302** responses with the same upstream client ID and exact stable callback; JWE state and **43-byte nonce cookie, Lax/Secure/Path=/, no Domain** |
+| Intentional invalid-code callback | **400** with the clean **Sign-in expired, try again** page; synthetic-invalid-code negative test only                                                                                                         |
 
-## Per-user mode: OpenWork identity (default)
+Main ran `scripts/verify-upstream-hosted.mjs` against both stable aliases. It reports **PARTIAL**. Main completed **no real-member consent** in these probes; **Guillaume must retry Connect** on the updated Preview test connection. These results are not a successful real-user callback or an RCA for the original valid-code failure. Unknown Den descriptions are redacted by the conservative whitelist, not interpreted as evidence of a particular cause; no Acme stage-log receipt beyond the probe is asserted here.
 
-Defaults: `AUTH_REQUIRED=true`, `IDENTITY_MODE=openwork`. Identity comes from the upstream signed-in person, not a synthetic persona. `IDENTITY_MODE=demo` explicitly enables the older auto-approve fixture identity; `AUTH_REQUIRED=false` explicitly selects shared/no-auth fixtures. A failed real sign-in never falls back to either mode.
+```sh
+node scripts/verify-upstream-hosted.mjs https://acme-home-demo-peruser-preview.vercel.app
+```
 
-### Configuration contract
+This active negative probe performs downstream DCR, follows no real login/consent, checks authorize redirects and submits an intentionally invalid code without a cookie. Sensitive OAuth URLs, IDs, codes and cookies are kept out of output. Main already ran it; this docs/script-only cleanup copies/formats it without executing it.
 
-- Current app origin: `https://acme-home-demo-loo267kwv-prologe.vercel.app`; app resource/audience: `https://acme-home-demo-loo267kwv-prologe.vercel.app/mcp`. Main reports this real-mode preview reachable after the approved protection change. The earlier protected, pre-design-change deployment is historical. Keep `https://acme-home-demo.vercel.app/mcp` as the unchanged production revert path.
-- Explicit `DEMO_AS_ISSUER` sets the app origin; otherwise trusted deployment `VERCEL_URL` supplies `https://${VERCEL_URL}`. Request Host, Origin and forwarded headers never select issuer/audience. An explicit canonical `http://127.0.0.1:<port>` app origin is supported for local tests; remote HTTP and localhost aliases are rejected.
-- `DEMO_AS_PRIVATE_KEY`: existing Ed25519 PKCS8 PEM, used for app JWT signatures and HKDF-SHA256 transaction encryption-key derivation bound to app/upstream issuers. No new secret or durable store is required by the code.
-- `UPSTREAM_ISSUER` defaults to `https://app.openworklabs.com/api/auth`. Discovery: `https://app.openworklabs.com/api/auth/.well-known/openid-configuration`. Explicit custom issuers must be canonical HTTPS or literal `http://127.0.0.1[:port]` for a local stub. All discovered endpoints must match the configured origin and remain inside its issuer path prefix. Redirects are rejected, fetch timeout is 10 seconds, and JSON responses are bounded to 64 KiB.
+## Historical callback failure — cause unconfirmed
 
-### Two OAuth legs
+The original user reported real consent followed by a valid-code callback `invalid_grant`. At baseline `67b5a3bf`, the verifier and original upstream client ID were **already retained inside encrypted transaction cookies**. The catch masked cookie/state errors, token rejection, ID-token verification, userinfo and missing org/profile claims as the same JSON error. Do not label this a proven verifier-loss or client-churn incident.
 
-1. The host registers a downstream public client with the app `/register`, using auth method `none`, scope `home:read` and its callback. Compact signed client IDs remain at most 512 characters and expire after 30 days. DCR can request authorization-code plus refresh-token grants, but the response negotiates authorization-code only.
-2. `/authorize` validates downstream client ID, exact registered redirect, app `/mcp` resource, S256 challenge and bounded state **before** upstream activity. It discovers the upstream IdP and registers a public client for `openid profile email`, with callback `<app origin>/oauth/upstream/callback`.
-3. A fresh independent S256 verifier, state and nonce are created. A five-minute authenticated-encrypted A256GCM JWE transaction cookie stores the validated downstream request, upstream client ID, verifier/state/nonce. It stores **no upstream access or ID token**. HTTPS cookie: `__Host-openwork-transaction`, Secure, HttpOnly, SameSite=Lax, Path=/. Ciphertext is capped at 3,800 bytes; oversized flows fail closed. Explicit local HTTP tests use a separate non-Secure cookie name.
-4. Callback can run on another app instance with the same key/issuers. It decrypts the cookie, validates state/expiry and optional callback issuer, rejects duplicate parameters, and exchanges the upstream code using the saved client and verifier. It verifies the ID token signature with origin-checked JWKS, exact upstream issuer, scalar audience equal to its upstream client ID, expiry and nonce. Userinfo is requested with the upstream access token; its `sub` must equal the verified ID-token subject.
-5. `sub`, `name`, `email` and `org_id` are bounded nonempty strings. Organization must be signed in the ID token as `https://app.openworklabs.com/org_id`; any userinfo organization claim must agree. Verified ID-token name/email take precedence, with same-sub userinfo fallback. Real subjects are not restricted to UUIDs. No upstream tokens are sent downstream, retained in the cookie, or logged.
-6. The app issues its own downstream code, retaining exact host client/redirect/resource/PKCE/state bindings, then its own access JWT with upstream `sub`, `name`, `email`, `org_id`, `identity_mode: openwork`, **app issuer and app `/mcp` audience**. Den MCP tokens and upstream ID/access tokens cannot authenticate to app `/mcp`. Demo tokens are rejected in real mode even if an app key is reused.
+This revision changes state transport and registration persistence and adds safe request-scoped diagnostics. A missing binding cookie is now allowed with valid authenticated state and all remaining OAuth checks; a present mismatch still rejects. Historical candidate causes include cookie loss/expiry, upstream code/PKCE, client/redirect and ID-token/userinfo/org/profile validation. None is confirmed. Main owns manual DCR, environment, stable alias and hosted retest.
 
-### Display and data isolation
+Verified baseline source `67b5a3bf` already emitted **SameSite=Lax**, Secure for HTTPS, Path=/ and no Domain. This matches the user's report of the old deployment; it was **not Strict**. That baseline check was source-only; main's newer negative live probe separately verified the current nonce-cookie attributes above without real-member consent.
 
-The greeting is `Good <time>, <first name>!` using the real name, with no fingerprint suffix. Initials derive from the name; the neutral role is `OpenWork member`, not a fabricated job. Footer shows real signed-in name, first 12 subject characters, generation, ISO server time and provider instance. `DEMO_VIEWER_NAME` cannot override verified real identity. Anonymous/401 states show **Connect to personalize**, not another identity or stale spinner.
+## Configuration
 
-Work fixtures and three independent per-panel counters are keyed by collision-safe encoding of **organization + subject** (`org_id|sub` conceptually). Same subject/different org has distinct data and counters. Refresh rotates meeting topics, incidents, approvals and goals/progress only in the selected panel. These are synthetic work scenarios, not employee records fetched from upstream. Real identity uses `whoami.identityMode: openwork`, `synthetic: false`; work payloads still carry `demo: true`.
+Defaults remain `AUTH_REQUIRED=true`, `IDENTITY_MODE=openwork`, `UPSTREAM_ISSUER=https://app.openworklabs.com/api/auth`. Discovery appends `/.well-known/openid-configuration`. App issuer is explicit `DEMO_AS_ISSUER` or trusted `https://${VERCEL_URL}`; it determines the exact callback and app `/mcp` audience. Request Host/Origin/forwarded headers never establish trust. Existing Ed25519 PKCS8 `DEMO_AS_PRIVATE_KEY` signs downstream JWTs and derives separate state/cache AES-GCM keys through HKDF; runtime never generates a replacement key.
 
-All `/mcp` and `/api/mcp` tool calls, including `acme_home {}`, require verified app tokens. Missing credentials produce HTTP 401 with a `resource_metadata` challenge. Invalid supplied tokens are always 401. Anonymous bootstrap only allows initialize/initialized notification, tool/resource listings and exact static UI resources; those contain no member data. The iframe calls through the host, never through browser-held OAuth tokens or direct API fetches. Three controllers and resource-bound tool calls remain independent; auth loss clears personal state while ordinary panel errors retain that panel's prior result.
+### Stable upstream client: env first
 
-DOM IDs: `viewer-identity`, `viewer-greeting`, `{today,attention,goals}-set`, `-identity`, `-generation`, `-generated-at`, `-instance`; row IDs: `meeting-item`, `attention-item`, `goal-item`.
+| Variable                       | Contract                                                                                                    |
+| ------------------------------ | ----------------------------------------------------------------------------------------------------------- |
+| `UPSTREAM_CLIENT_ID`           | Registered client; takes precedence over Blob and DCR                                                       |
+| `UPSTREAM_CLIENT_ISSUER`       | Required with env client, exactly matching `UPSTREAM_ISSUER`                                                |
+| `UPSTREAM_CLIENT_REDIRECT_URI` | Required with env client, exactly `<app issuer>/oauth/upstream/callback`                                    |
+| `UPSTREAM_CLIENT_AUTH_METHOD`  | Defaults to `none`; explicit `client_secret_post` or `client_secret_basic` must match the registered method |
+| `UPSTREAM_CLIENT_SECRET`       | Absent for `none`, required for either secret method; never used to guess auth method                       |
+| `BLOB_READ_WRITE_TOKEN`        | Needed only if no env client is configured and private registration storage is used                         |
 
-### Operational/security limitations
+Invalid/partial env configuration fails closed and does not fall through to Blob. Absent env client plus absent Blob configuration fails authorization before discovery/DCR, while public app metadata/static UI stays accessible. Public clients use no secret; post puts the secret in the form only; Basic uses form-encoded credentials in the authorization header. Main completed the public-client provisioning and exact stable bindings reported above. No provisioning script was added; the copied negative verifier does not set env values or register new upstream clients.
 
-- Discovery and upstream DCR are cached once **per handler instance**, sharing the pending promise across concurrent authorization starts. Cold starts may create additional upstream registrations/consent prompts. A callback uses its encrypted original client ID without re-registering. Cached failures do not silently retry or downgrade identity mode. Each cold instance may add an upstream client registry entry; this additional per-instance registration lifecycle is not production ready. Main owns upstream registration policy, quotas and cleanup.
-- One outstanding transaction cookie per browser/app origin: finish one Connect at a time. Starting another replaces the old transaction. Cookies clear on callback success/failure; key or issuer changes invalidate in-flight flows. Upstream owns its code single-use enforcement.
-- **Downstream codes are still short-lived, not single-use in both modes**: inherited stateless 60-second codes can be redeemed again with the same verifier. App tokens last one hour; no refresh, revocation registry or upstream logout propagation. This is a preview identity bridge, **not complete production OAuth 2.1 compliance**. Public DCR and no separate downstream-client consent controls require trusted preview hosts; production needs a durable replay/revocation design and security review.
-- Counters are per org/subject/panel/instance and reset after cold starts. No database, Redis, durable business store or replay registry. Real identity does not make synthetic work content real.
-- Code sanitizes OAuth errors and never logs upstream tokens, codes, client IDs or transaction cookies. Main must separately ensure infrastructure access logs do not record sensitive query strings.
+### Private encrypted cache
 
-## Explicit demo and shared modes
+`server/upstream-client.ts` follows the read-only/private Blob access pattern studied in World Clocks, not its overwrite or memory fallback semantics. SDK `get` uses `access: private`, `useCache: false`. The path `oauth/registrations/v1/<sha256(exact issuer, exact callback)>.jwe` is deterministic. The registration is AES-GCM encrypted, then checked against exact issuer/callback on read. No public object or plaintext credential file.
 
-`IDENTITY_MODE=demo` retains the calendar reference's UUID subjects, synthetic names/roles/avatars and 12-hex subject fingerprint suffix. `DEMO_VIEWER_NAME` only overrides demo names. Reauthorization creates a fresh synthetic subject, not an employee identity. Demo OAuth discovery describes:
+Only a genuine miss at authorization start can perform public DCR for `openid profile email`. Persist with `allowOverwrite: false` and `addRandomSuffix: false`, then read back the durable winner before use. Initial concurrent misses may create unused upstream registrations, but every caller uses the persisted winner, never its losing/unpersisted candidate. There is no distributed DCR lock; main owns orphan review. Ordinary fresh instances read the same client, **not per-instance DCR**. Callback never registers. Corrupt cache, read/write failure or key mismatch fails closed without overwrite, fallback or automatic registration retry. Issuer/callback/key changes require deliberate operator handling.
 
-**demo authorization server: accepts every request; codes are short-lived, not single-use**
+## Encrypted state and browser binding
 
-This auto-approves valid protocol requests; it does not authenticate real people. Codes are EdDSA-signed, expire after 60 seconds, and bind subject, client, redirect URI, resource and PKCE challenge. Replay with the same verifier within that lifetime is intentionally possible. Access tokens expire after one hour. No refresh tokens. DCR client IDs are signed metadata and expire after 30 days. This is **not production OAuth 2.1 authentication**; notably, OAuth's single-use-code requirement is deliberately not implemented. Protocol validation still rejects malformed requests, wrong audiences/issuers/signatures, wrong PKCE verifiers and unregistered redirects.
+1. Validate host DCR client, exact downstream redirect/resource and S256 challenge first. Downstream scope is `home:read`, compact client IDs remain at most 512 characters.
+2. Carry verifier, OIDC nonce, original downstream return request, selected upstream client ID/auth method/exact callback and a browser-binding hash inside URL **state JWE**, using A256GCM authenticated encryption. It has five-minute expiry, app issuer, callback audience and an issuer-bound key context; any matching app instance can decrypt it. AEAD supplies integrity without a second signature layer.
+3. The binding-only cookie value is exactly **43 ASCII bytes**, encoding 32 random bytes. HTTPS uses `__Host-openwork-binding` with **SameSite=Lax; Secure; HttpOnly; Path=/**, Max-Age 300 and **no Domain**. No transaction, credentials or return request is stored in it. Local explicit HTTP uses `openwork-local-binding` without Secure. A present cookie must match authenticated state; malformed, duplicate or mismatched named cookies fail rather than being treated as absent.
+4. Clear the cookie on success/failure, but accept its absence when authenticated, unexpired app-bound JWE state and upstream nonce/PKCE plus downstream PKCE/state checks pass. The bridge stores no logged-in app session. Duplicate parameters, wrong issuer, invalid state or saved/current client, method or exact callback mismatch still reject. Authorize/token redirect URI bytes must be identical; the consuming downstream host must validate the echoed state.
+5. Exchange once, with no automatic token/auth retry. Verify ID-token issuer, client audience, signature/JWKS and nonce; require userinfo sub equality. Require signed `https://app.openworklabs.com/org_id` and bounded nonempty sub/name/email/org. Real sub is not UUID-only.
+6. Issue app-owned downstream code/JWT with real claims and app `/mcp` audience. Den MCP/upstream ID or access tokens cannot authenticate to app `/mcp`. Org+sub keys isolate synthetic sets and per-panel counters; real names have no synthetic suffix. Anonymous/data 401 states clear identity and display Connect to personalize.
 
-`AUTH_REQUIRED=false pnpm serve` runs original shared local fixtures (loopback port 4328). `AUTH_REQUIRED=false pnpm serve:stdio` is also local shared-fixture transport, not the real HTTP identity boundary. Neither is a workaround for failed real sign-in.
+Bounds: 64 KiB upstream JSON; 16 KiB encrypted registration; 8 KiB state; 16 KiB callback URL; 8 KiB total Cookie header; five-minute state/binding; ten-second fetch/Blob timeouts. Discovery endpoints must stay on exact configured origin and issuer path prefix, without redirects. Only explicit literal `http://127.0.0.1[:port]` is permitted for local test issuers; remote HTTP is rejected.
 
-## Verification and handoff
+## Diagnostics, clean errors and replay limits
 
-Use the already-installed Node 24.20.0 / pnpm 11.4.0:
+Callback failures return HTTP 400 HTML: **“Sign-in expired, try again”**, instructing manual Connect, with no transaction values, scripts, forms or automatic retry. No-store/no-referrer/CSP headers protect the response. The generic heading does not diagnose the hosted cause as expiry.
+
+Failure logs include allowlisted stage/error code, exact known safe Den `error_description` or `redacted`, bounded HTTP status and the callback-local fields below. No raw exceptions/stacks, URLs, code/token/cookie/client ID/email/org values or multiline descriptions are logged. Main must separately redact infrastructure query logs.
+
+| Callback diagnostic  | Meaning                                                                                                                                  |
+| -------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
+| `cookiePresent`      | Whether the named binding cookie was in this request                                                                                     |
+| `stateMatch`         | False until JWE authentication/decryption, expiry and app/transaction binding validation succeed, then true regardless of cookie absence |
+| `cookieMatch`        | Optional, omitted when absent or comparison not reached; true only after match, false for present invalid/mismatched cookie              |
+| `clientIdUsed`       | SHA-256 hex fingerprint only of selected client ID, omitted until selection                                                              |
+| `redirectUriUsed`    | SHA-256 hex fingerprint only of selected callback URI, omitted until selection                                                           |
+| `redirectUriMatches` | True after exact selected/saved/app callback equality; false until checked or on mismatch, interpreted with stage                        |
+
+Each callback gets its own explicit context; logs are sanitized snapshots, not shared per-instance mutable request data. Stages still distinguish token exchange, ID-token verification, nonce, userinfo, `missing-org-claim` and profile failures. Successful code issuance emits safe `callback-complete` by default; set source option `upstreamOptions.logCallbackSuccess=false` to suppress that summary. It does not prove downstream redemption, host acceptance or any logged-in app session.
+
+**Absent-cookie tradeoff:** without the cookie, the bridge intentionally skips browser continuity/CSRF binding; a valid transaction can be transferred between browsers. Authenticated state and the upstream nonce/PKCE plus downstream PKCE/state bindings remain required, but do not substitute for that skipped continuity check. No logged-in app session is stored; this is not a claim of complete CSRF protection.
+
+Captured state can be resubmitted even without its original cookie. Upstream enforces authorization-code replay rejection; the downstream host validates echoed state and the app enforces downstream PKCE. There is no durable transaction replay registry. Downstream codes retain the inherited 60-second replay window with the same verifier. Cookie clearing is cleanup, not replay prevention. App tokens last one hour with no refresh/revocation/logout propagation; this is not fully replay-proof, production-ready OAuth 2.1 or hosted proof.
+
+## Local verification and demo fallback
+
+Use main's already-installed Node 24.20.0, pnpm 11.4.0 and dependencies:
 
 ```sh
 pnpm typecheck
 pnpm lint
 pnpm build
 pnpm test
+pnpm test:ui
 ```
 
-`tests/oidc.test.ts` runs local stub discovery, DCR, authorize, token, JWKS and userinfo with ephemeral in-memory keys. It tests claim mapping, invalid signature/issuer/audience/nonce/state/PKCE, userinfo mismatches, cross-instance/expired/tampered cookies, SSRF controls, size bounds, real names and all three org-isolated sets. The earlier OAuth tests explicitly select `identityMode: demo` and retain the calendar contract. SDK registration validation uses installed SDK 2.0, not an added dependency. No authenticated live provider calls are made.
+Tests use local OIDC stubs, in-memory keys and injected fake cache/Blob SDK seams. Coverage includes cross-instance absent-cookie success, present-cookie mismatch rejection, exact attributes/43-byte cookie size, overlapping callback diagnostic isolation, hash-only/redacted fields, stable/racing cache selection, both PKCE legs, claims and reuse. No live Blob or authenticated provider calls. The older 49 Node / 5 browser passes and scoped source+bundle Betterleaks zero (22 third-party fixtures in the wider scan) are historical. Current local totals are 64/64 Node and 6/6 browser checks; main's new live probe is negative-only and does not establish real-member consent/callback success. This docs/script cleanup reruns neither those suites nor scans.
 
-```sh
-pnpm exec tsx scripts/verify-hosted.ts 'https://acme-home-demo-loo267kwv-prologe.vercel.app'
-```
+Explicit `IDENTITY_MODE=demo` retains the prior synthetic-UUID auto-approve flow: **demo authorization server: accepts every request; codes are short-lived, not single-use**. `AUTH_REQUIRED=false pnpm serve` runs shared fixtures on loopback port 4328; `AUTH_REQUIRED=false pnpm serve:stdio` is shared stdio. Neither is an automatic fallback for real auth errors. Work data remains synthetic in every mode.
 
-The curl verifier passes sensitive configuration through stdin only. In real mode it verifies public metadata/static UI and anonymous data rejection, then reports **INCOMPLETE / exit 2** without DCR/sign-in; browser-based real login and two-member host proof belong to main. Only explicit demo mode runs its two full synthetic flows. Errors suppress raw responses and stack traces. The earlier missing-Chromium blocker was superseded by main's green 5/5 browser run. Both previews passed the hosted verifier's public checks and exited 2 / INCOMPLETE; no hosted consent flows or real names have been verified. Manual user sign-in is requested because no session browser tab was available.
+## Preview history and revert
 
-See [Per-user (OAuth) mode](ADD-TO-OPENWORK.md). Production remains untouched at `https://acme-home-demo.vercel.app/mcp`; preview deployment/environment work is complete as reported above. Hosted user sign-in and acceptance remain separate, incomplete steps.
+Historical, no longer the connection URL: `https://acme-home-demo-loo267kwv-prologe.vercel.app/mcp`. Main disabled preview protection with DIRECT Guillaume approval and generated keys in memory, piping them into preview environment without secret files. Earlier public metadata/static UI/anonymous 401 checks exited 2 / INCOMPLETE; the original user's later valid-code callback failed. Vercel refused aliasing the generated deployment URL. The current stable alias and underlying Preview are listed at the top; main's new verifier returned PARTIAL after an intentional invalid-code test, not a successful real-member flow.
+
+Original production remains untouched: `https://acme-home-demo.vercel.app/mcp`. Do not repoint its shared experiment connector. Main has completed stable alias/public registration/env/deployment work. Guillaume must retry the updated Preview test connection for real-member acceptance; promote/merge remains a separate decision. See [ADD-TO-OPENWORK.md](ADD-TO-OPENWORK.md).

@@ -107,7 +107,7 @@ var schemas = {
 
 // server/oauth.ts
 import {
-  createHash as createHash2,
+  createHash as createHash3,
   createPrivateKey,
   createPublicKey,
   randomBytes as randomBytes2,
@@ -118,41 +118,344 @@ import { jwtVerify as jwtVerify2, SignJWT } from "jose";
 
 // server/upstream.ts
 import {
-  createHash,
-  hkdfSync,
+  createHash as createHash2,
+  hkdfSync as hkdfSync2,
   randomBytes,
   timingSafeEqual
 } from "node:crypto";
-import { createLocalJWKSet, EncryptJWT, jwtDecrypt, jwtVerify } from "jose";
+import { createLocalJWKSet, EncryptJWT as EncryptJWT2, jwtDecrypt as jwtDecrypt2, jwtVerify } from "jose";
+import { z as z3 } from "zod";
+
+// server/upstream-client.ts
+import { BlobNotFoundError, get, put } from "@vercel/blob";
+import { createHash, hkdfSync } from "node:crypto";
+import { EncryptJWT, jwtDecrypt } from "jose";
 import { z as z2 } from "zod";
+
+// server/oidc-errors.ts
+var stages = [
+  "configuration",
+  "discovery",
+  "registration-read",
+  "registration-create",
+  "registration-write",
+  "registration-binding",
+  "authorization-start",
+  "callback-parameters",
+  "state-decrypt",
+  "browser-binding",
+  "upstream-authorization",
+  "token-exchange",
+  "id-token-response",
+  "jwks",
+  "id-token-verification",
+  "nonce-validation",
+  "subject-validation",
+  "userinfo",
+  "userinfo-subject",
+  "missing-org-claim",
+  "org-claim-validation",
+  "profile-claims",
+  "downstream-code",
+  "callback-complete"
+];
+var codes = /* @__PURE__ */ new Set([
+  "invalid_request",
+  "invalid_client",
+  "invalid_grant",
+  "invalid_scope",
+  "invalid_token",
+  "unauthorized_client",
+  "unsupported_grant_type",
+  "access_denied",
+  "login_required",
+  "consent_required",
+  "server_error",
+  "temporarily_unavailable"
+]);
+var descriptions = /* @__PURE__ */ new Set([
+  "invalid code verifier",
+  "invalid authorization code",
+  "authorization code expired",
+  "authorization code already used",
+  "code has expired",
+  "invalid redirect uri",
+  "invalid client credentials",
+  "invalid grant",
+  "invalid nonce"
+]);
+function callbackFields(context) {
+  if (!context) return {};
+  const fingerprint = (value) => typeof value === "string" && /^[0-9a-f]{64}$/.test(value);
+  return {
+    cookiePresent: context.cookiePresent === true,
+    stateMatch: context.stateMatch === true,
+    redirectUriMatches: context.redirectUriMatches === true,
+    ...context.cookiePresent === true && typeof context.cookieMatch === "boolean" ? { cookieMatch: context.cookieMatch } : {},
+    ...fingerprint(context.clientIdUsed) ? { clientIdUsed: context.clientIdUsed } : {},
+    ...fingerprint(context.redirectUriUsed) ? { redirectUriUsed: context.redirectUriUsed } : {}
+  };
+}
+var SignInError = class extends Error {
+  diagnostic;
+  constructor(stage, code, description, status) {
+    super("Sign-in failed");
+    const normalized = typeof description === "string" && description.length <= 256 ? description.trim().toLowerCase() : "";
+    this.diagnostic = {
+      stage,
+      error: typeof code === "string" && codes.has(code) ? code : "redacted",
+      error_description: descriptions.has(normalized) && typeof description === "string" && !/[\r\n]/.test(description) ? normalized : "redacted",
+      ...Number.isInteger(status) && status !== void 0 && status >= 100 && status <= 599 ? { status } : {}
+    };
+  }
+};
+function diagnosticFor(error, fallback) {
+  if (!(error instanceof SignInError))
+    return new SignInError(fallback).diagnostic;
+  const data = error.diagnostic;
+  return new SignInError(
+    stages.includes(data.stage) ? data.stage : fallback,
+    data.error,
+    data.error_description,
+    data.status
+  ).diagnostic;
+}
+async function signInStep(stage, work) {
+  try {
+    return await work();
+  } catch (error) {
+    if (error instanceof SignInError) throw error;
+    throw new SignInError(stage);
+  }
+}
+
+// server/upstream-client.ts
+var field = (max) => z2.string().min(1).max(max).refine(
+  (value) => value.trim().length > 0 && !/[\u0000-\u001f\u007f]/.test(value)
+);
+var authMethodSchema = z2.enum([
+  "none",
+  "client_secret_post",
+  "client_secret_basic"
+]);
+var registrationSchema = z2.object({
+  clientId: field(512),
+  clientSecret: field(4096).optional(),
+  authMethod: authMethodSchema,
+  issuer: field(2048),
+  redirectUri: field(2048)
+});
+var LIMIT = 16384;
+function registrationPath(issuer, callback) {
+  return `oauth/registrations/v1/${createHash("sha256").update(JSON.stringify([issuer, callback])).digest("hex")}.jwe`;
+}
+function privateRegistrationCache(token, sdk = { get, put }) {
+  function validPath(path) {
+    if (!/^oauth\/registrations\/v1\/[0-9a-f]{64}\.jwe$/.test(path))
+      throw new SignInError("registration-binding");
+  }
+  return {
+    async read(path) {
+      validPath(path);
+      try {
+        const result = await sdk.get(path, {
+          access: "private",
+          token,
+          useCache: false,
+          abortSignal: AbortSignal.timeout(1e4)
+        });
+        if (!result) return null;
+        if (result.statusCode !== 200)
+          throw new SignInError("registration-read");
+        if (result.blob.size > LIMIT) {
+          await result.stream.cancel();
+          throw new SignInError("registration-read");
+        }
+        const reader = result.stream.getReader();
+        const chunks = [];
+        let size = 0;
+        try {
+          for (; ; ) {
+            const chunk = await reader.read();
+            if (chunk.done) break;
+            size += chunk.value.byteLength;
+            if (size > LIMIT) {
+              await reader.cancel();
+              throw new SignInError("registration-read");
+            }
+            chunks.push(chunk.value);
+          }
+        } finally {
+          reader.releaseLock();
+        }
+        return Buffer.concat(chunks).toString("utf8");
+      } catch (error) {
+        if (error instanceof BlobNotFoundError) return null;
+        throw new SignInError("registration-read");
+      }
+    },
+    async create(path, encrypted) {
+      validPath(path);
+      if (Buffer.byteLength(encrypted) > LIMIT)
+        throw new SignInError("registration-write");
+      await sdk.put(path, encrypted, {
+        token,
+        access: "private",
+        allowOverwrite: false,
+        addRandomSuffix: false,
+        contentType: "application/jose",
+        cacheControlMaxAge: 60,
+        abortSignal: AbortSignal.timeout(1e4)
+      });
+    }
+  };
+}
+function createClientResolver(issuer, callback, privateKey, options = {}) {
+  const env = options.env ?? process.env;
+  const path = registrationPath(issuer, callback);
+  const key = new Uint8Array(
+    hkdfSync(
+      "sha256",
+      privateKey.export({ type: "pkcs8", format: "der" }),
+      Buffer.from(issuer),
+      Buffer.from(`employee-home-upstream-registration-v1\0${callback}`),
+      32
+    )
+  );
+  function validated(value) {
+    const client = registrationSchema.parse(value);
+    if (client.issuer !== issuer || client.redirectUri !== callback || (client.authMethod === "none" ? client.clientSecret !== void 0 : client.clientSecret === void 0))
+      throw new SignInError("registration-binding");
+    return client;
+  }
+  function configured2() {
+    if (env.UPSTREAM_CLIENT_ID === void 0) {
+      if ([
+        env.UPSTREAM_CLIENT_SECRET,
+        env.UPSTREAM_CLIENT_ISSUER,
+        env.UPSTREAM_CLIENT_REDIRECT_URI,
+        env.UPSTREAM_CLIENT_AUTH_METHOD
+      ].some((value) => value !== void 0))
+        throw new SignInError("configuration");
+      return void 0;
+    }
+    try {
+      return validated({
+        clientId: env.UPSTREAM_CLIENT_ID,
+        clientSecret: env.UPSTREAM_CLIENT_SECRET,
+        issuer: env.UPSTREAM_CLIENT_ISSUER,
+        redirectUri: env.UPSTREAM_CLIENT_REDIRECT_URI,
+        authMethod: env.UPSTREAM_CLIENT_AUTH_METHOD ?? "none"
+      });
+    } catch {
+      throw new SignInError("configuration");
+    }
+  }
+  async function decode(encrypted) {
+    return signInStep("registration-binding", async () => {
+      if (Buffer.byteLength(encrypted) > LIMIT)
+        throw new SignInError("registration-binding");
+      const { payload } = await jwtDecrypt(encrypted, key, {
+        issuer,
+        audience: callback,
+        keyManagementAlgorithms: ["dir"],
+        contentEncryptionAlgorithms: ["A256GCM"],
+        typ: "upstream-registration+jwt",
+        requiredClaims: ["iat"]
+      });
+      if (payload.purpose !== "upstream-registration-v1")
+        throw new SignInError("registration-binding");
+      return validated(payload.client);
+    });
+  }
+  async function resolve(allowCreate, register) {
+    const explicit = configured2();
+    if (explicit) return explicit;
+    const cache = options.registrationCache ?? (env.BLOB_READ_WRITE_TOKEN ? privateRegistrationCache(env.BLOB_READ_WRITE_TOKEN) : void 0);
+    if (!cache) throw new SignInError("configuration");
+    const existing = await signInStep(
+      "registration-read",
+      () => cache.read(path)
+    );
+    if (existing !== null) return decode(existing);
+    if (!allowCreate) throw new SignInError("registration-read");
+    const candidate = await signInStep(
+      "registration-create",
+      async () => validated(await register())
+    );
+    const encrypted = await new EncryptJWT({
+      purpose: "upstream-registration-v1",
+      client: candidate
+    }).setProtectedHeader({
+      alg: "dir",
+      enc: "A256GCM",
+      typ: "upstream-registration+jwt"
+    }).setIssuer(issuer).setAudience(callback).setIssuedAt().encrypt(key);
+    try {
+      await cache.create(path, encrypted);
+    } catch {
+    }
+    const winner = await signInStep(
+      "registration-write",
+      () => cache.read(path)
+    );
+    if (winner === null) throw new SignInError("registration-write");
+    return decode(winner);
+  }
+  return { resolve };
+}
+function clientAuthentication(client) {
+  if (client.authMethod === "none")
+    return { headers: {}, fields: { client_id: client.clientId } };
+  if (!client.clientSecret) throw new SignInError("configuration");
+  if (client.authMethod === "client_secret_post")
+    return {
+      headers: {},
+      fields: {
+        client_id: client.clientId,
+        client_secret: client.clientSecret
+      }
+    };
+  const encode = (value) => new URLSearchParams({ value }).toString().slice(6);
+  return {
+    headers: {
+      Authorization: `Basic ${Buffer.from(`${encode(client.clientId)}:${encode(client.clientSecret)}`).toString("base64")}`
+    },
+    fields: {}
+  };
+}
+
+// server/upstream.ts
 var DEFAULT_UPSTREAM_ISSUER = "https://app.openworklabs.com/api/auth";
 var ORG_CLAIM = "https://app.openworklabs.com/org_id";
 var CALLBACK_PATH = "/oauth/upstream/callback";
 var TTL = 300;
 var RESPONSE_LIMIT = 64 * 1024;
-var COOKIE_LIMIT = 3800;
-var opaque = z2.string().regex(/^[A-Za-z0-9_-]{43}$/);
-var boundedClaim = (max) => z2.string().min(1).max(max).refine(
+var STATE_LIMIT = 8192;
+var opaque = z3.string().regex(/^[A-Za-z0-9_-]{43}$/);
+var boundedClaim = (max) => z3.string().min(1).max(max).refine(
   (value) => value.trim().length > 0 && !/[\u0000-\u001f\u007f]/.test(value)
 );
-var realIdentitySchema = z2.object({
-  identityMode: z2.literal("openwork"),
+var realIdentitySchema = z3.object({
+  identityMode: z3.literal("openwork"),
   sub: boundedClaim(256),
   name: boundedClaim(256),
   email: boundedClaim(320),
   org_id: boundedClaim(256)
 });
-var downstreamSchema = z2.object({
+var downstreamSchema = z3.object({
   client_id: boundedClaim(512),
   redirect_uri: boundedClaim(2048),
   resource: boundedClaim(2048),
   code_challenge: opaque,
-  state: z2.string().max(1024).optional()
+  state: z3.string().max(1024).optional()
 }).strict();
-var transactionSchema = z2.object({
-  purpose: z2.literal("oidc-transaction"),
+var transactionSchema = z3.object({
+  purpose: z3.literal("oidc-transaction-v2"),
   clientId: boundedClaim(512),
-  state: opaque,
+  authMethod: authMethodSchema,
+  redirectUri: boundedClaim(2048),
+  browserHash: z3.string().regex(/^[0-9a-f]{64}$/),
   nonce: opaque,
   verifier: opaque,
   downstream: downstreamSchema
@@ -168,28 +471,38 @@ function equal(a, b) {
   return left.length === right.length && timingSafeEqual(left, right);
 }
 function upstreamIssuer(value) {
-  const url = new URL(value);
+  let url;
+  try {
+    url = new URL(value);
+  } catch {
+    throw new SignInError("configuration");
+  }
   const local = /^http:\/\/127\.0\.0\.1(?::\d+)?(?:\/|$)/.test(value) && url.hostname === "127.0.0.1";
   if (url.protocol !== "https:" && !local || url.username || url.password || url.search || url.hash || /[\s\\]/.test(value) || value.endsWith("/") || value !== url.origin + (url.pathname === "/" ? "" : url.pathname))
-    throw new Error(
-      "UPSTREAM_ISSUER must be a canonical HTTPS issuer or explicit http://127.0.0.1 local issuer"
-    );
+    throw new SignInError("configuration");
   return url;
 }
-function createUpstream(appIssuer, privateKey, configuredIssuer = DEFAULT_UPSTREAM_ISSUER) {
+function createUpstream(appIssuer, privateKey, configuredIssuer = DEFAULT_UPSTREAM_ISSUER, options = {}) {
   const upstream = upstreamIssuer(configuredIssuer);
   const callback = `${appIssuer}${CALLBACK_PATH}`;
   const secure = new URL(appIssuer).protocol === "https:";
-  const cookieName = secure ? "__Host-openwork-transaction" : "openwork-local-transaction";
+  const cookieName = secure ? "__Host-openwork-binding" : "openwork-local-binding";
   const key = new Uint8Array(
-    hkdfSync(
+    hkdfSync2(
       "sha256",
       privateKey.export({ type: "pkcs8", format: "der" }),
       Buffer.from(appIssuer),
-      Buffer.from(`employee-home-oidc-transaction-v1\0${configuredIssuer}`),
+      Buffer.from(`employee-home-oidc-state-v2\0${configuredIssuer}`),
       32
     )
   );
+  const clients = createClientResolver(
+    configuredIssuer,
+    callback,
+    privateKey,
+    options
+  );
+  const digest = (value) => createHash2("sha256").update(value).digest("hex");
   function endpoint(value) {
     const raw = boundedClaim(2048).parse(value);
     const url = new URL(raw);
@@ -199,211 +512,355 @@ function createUpstream(appIssuer, privateKey, configuredIssuer = DEFAULT_UPSTRE
       throw new Error("Untrusted upstream endpoint");
     return url.href;
   }
-  async function request(url, init = {}) {
-    const response = await fetch(endpoint(url), {
-      ...init,
-      redirect: "error",
-      signal: AbortSignal.timeout(1e4),
-      headers: { Accept: "application/json", ...init.headers }
-    });
-    if (!response.ok || !/^application\/(?:[a-z0-9.+-]*\+)?json\b/i.test(
-      response.headers.get("content-type") ?? ""
-    )) {
-      await response.body?.cancel();
-      throw new Error("Upstream request failed");
-    }
-    const length = response.headers.get("content-length");
-    if (length && (!/^\d+$/.test(length) || Number(length) > RESPONSE_LIMIT)) {
-      await response.body?.cancel();
-      throw new Error("Upstream response too large");
-    }
-    if (!response.body) throw new Error("Empty upstream response");
-    const reader = response.body.getReader();
-    const chunks = [];
-    let size = 0;
-    try {
-      for (; ; ) {
-        const chunk = await reader.read();
-        if (chunk.done) break;
-        size += chunk.value.byteLength;
-        if (size > RESPONSE_LIMIT) {
-          await reader.cancel();
-          throw new Error("Upstream response too large");
-        }
-        chunks.push(chunk.value);
+  async function request(stage, url, init = {}) {
+    return signInStep(stage, async () => {
+      const response = await fetch(endpoint(url), {
+        ...init,
+        redirect: "error",
+        signal: AbortSignal.timeout(1e4),
+        headers: { Accept: "application/json", ...init.headers }
+      });
+      if (!/^application\/(?:[a-z0-9.+-]*\+)?json\b/i.test(
+        response.headers.get("content-type") ?? ""
+      )) {
+        await response.body?.cancel();
+        throw new SignInError(stage, void 0, void 0, response.status);
       }
-    } finally {
-      reader.releaseLock();
-    }
-    return record(JSON.parse(Buffer.concat(chunks).toString("utf8")));
+      const length = response.headers.get("content-length");
+      if (length && (!/^\d+$/.test(length) || Number(length) > RESPONSE_LIMIT)) {
+        await response.body?.cancel();
+        throw new SignInError(stage, void 0, void 0, response.status);
+      }
+      if (!response.body)
+        throw new SignInError(stage, void 0, void 0, response.status);
+      const reader = response.body.getReader();
+      const chunks = [];
+      let size = 0;
+      try {
+        for (; ; ) {
+          const chunk = await reader.read();
+          if (chunk.done) break;
+          size += chunk.value.byteLength;
+          if (size > RESPONSE_LIMIT) {
+            await reader.cancel();
+            throw new SignInError(stage);
+          }
+          chunks.push(chunk.value);
+        }
+      } finally {
+        reader.releaseLock();
+      }
+      const data = record(JSON.parse(Buffer.concat(chunks).toString("utf8")));
+      if (!response.ok || data.error !== void 0)
+        throw new SignInError(
+          stage,
+          data.error,
+          data.error_description,
+          response.status
+        );
+      return data;
+    });
   }
   async function discover() {
-    const data = await request(
-      `${configuredIssuer}/.well-known/openid-configuration`
-    );
-    if (data.issuer !== configuredIssuer || !Array.isArray(data.code_challenge_methods_supported) || !data.code_challenge_methods_supported.includes("S256") || !Array.isArray(data.token_endpoint_auth_methods_supported) || !data.token_endpoint_auth_methods_supported.includes("none"))
-      throw new Error("Unsupported upstream metadata");
-    const advertised = data.id_token_signing_alg_values_supported;
-    const algorithms = ["EdDSA", "RS256", "ES256", "PS256"].filter(
-      (alg) => Array.isArray(advertised) && advertised.includes(alg)
-    );
-    if (!algorithms.length) throw new Error("Unsupported ID token algorithms");
-    return {
-      authorization: endpoint(data.authorization_endpoint),
-      token: endpoint(data.token_endpoint),
-      registration: endpoint(data.registration_endpoint),
-      jwks: endpoint(data.jwks_uri),
-      userinfo: endpoint(data.userinfo_endpoint),
-      algorithms
-    };
+    return signInStep("discovery", async () => {
+      const data = await request(
+        "discovery",
+        `${configuredIssuer}/.well-known/openid-configuration`
+      );
+      if (data.issuer !== configuredIssuer || !Array.isArray(data.code_challenge_methods_supported) || !data.code_challenge_methods_supported.includes("S256") || !Array.isArray(data.token_endpoint_auth_methods_supported))
+        throw new SignInError("discovery");
+      const authMethods = z3.array(authMethodSchema).min(1).parse(
+        data.token_endpoint_auth_methods_supported.filter(
+          (value) => authMethodSchema.safeParse(value).success
+        )
+      );
+      const advertised = data.id_token_signing_alg_values_supported;
+      const algorithms = ["EdDSA", "RS256", "ES256", "PS256"].filter(
+        (alg) => Array.isArray(advertised) && advertised.includes(alg)
+      );
+      if (!algorithms.length) throw new SignInError("discovery");
+      return {
+        authorization: endpoint(data.authorization_endpoint),
+        token: endpoint(data.token_endpoint),
+        registration: data.registration_endpoint === void 0 ? void 0 : endpoint(data.registration_endpoint),
+        jwks: endpoint(data.jwks_uri),
+        userinfo: endpoint(data.userinfo_endpoint),
+        algorithms,
+        authMethods
+      };
+    });
   }
   let discovery;
   const metadata = () => discovery ??= discover();
   async function register() {
-    const data = await request((await metadata()).registration, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        client_name: "Employee Home identity bridge",
-        redirect_uris: [callback],
-        token_endpoint_auth_method: "none",
-        response_types: ["code"],
-        grant_types: ["authorization_code"],
-        scope: "openid profile email",
-        application_type: "web"
-      })
+    return signInStep("registration-create", async () => {
+      const info = await metadata();
+      if (!info.authMethods.includes("none"))
+        throw new SignInError("configuration");
+      if (!info.registration) throw new SignInError("registration-create");
+      const data = await request("registration-create", info.registration, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          client_name: "Employee Home identity bridge",
+          redirect_uris: [callback],
+          token_endpoint_auth_method: "none",
+          response_types: ["code"],
+          grant_types: ["authorization_code"],
+          scope: "openid profile email",
+          application_type: "web"
+        })
+      });
+      if (data.token_endpoint_auth_method !== "none" || !Array.isArray(data.redirect_uris) || data.redirect_uris.length !== 1 || data.redirect_uris[0] !== callback)
+        throw new SignInError("registration-binding");
+      return {
+        clientId: boundedClaim(512).parse(data.client_id),
+        authMethod: "none",
+        issuer: configuredIssuer,
+        redirectUri: callback
+      };
     });
-    if (data.token_endpoint_auth_method !== "none" || !Array.isArray(data.redirect_uris) || data.redirect_uris.length !== 1 || data.redirect_uris[0] !== callback)
-      throw new Error("Invalid upstream registration");
-    return boundedClaim(512).parse(data.client_id);
   }
-  let registration;
   function cookie(res, value, age) {
     res.setHeader(
       "Set-Cookie",
       `${cookieName}=${value}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${age}${secure ? "; Secure" : ""}`
     );
   }
+  function bindingCookies(req) {
+    return (req.headers.cookie ?? "").split(";").map((entry) => entry.trim()).filter((entry) => entry.split("=", 1)[0]?.trim() === cookieName);
+  }
+  function callbackContext(req) {
+    const cookiePresent = bindingCookies(req).length > 0;
+    return { cookiePresent, stateMatch: false, redirectUriMatches: false };
+  }
+  function emit(diagnostic, success2 = false) {
+    try {
+      if (options.diagnostics) options.diagnostics(diagnostic);
+      else
+        console.error(
+          JSON.stringify({
+            event: success2 ? "oidc-callback-complete" : "oidc-sign-in-failed",
+            ...diagnostic
+          })
+        );
+    } catch {
+    }
+  }
+  function report(error, fallback, context) {
+    emit({ ...diagnosticFor(error, fallback), ...callbackFields(context) });
+  }
+  function success(context) {
+    if (options.logCallbackSuccess === false) return;
+    emit(
+      {
+        stage: "callback-complete",
+        error: "none",
+        error_description: "none",
+        ...callbackFields(context)
+      },
+      true
+    );
+  }
+  function failure(res, error, fallback, context) {
+    cookie(res, "", 0);
+    report(error, fallback, context);
+    res.statusCode = 400;
+    res.removeHeader("Location");
+    res.setHeader("Content-Type", "text/html; charset=utf-8");
+    res.setHeader("Cache-Control", "no-store");
+    res.setHeader("Referrer-Policy", "no-referrer");
+    res.setHeader(
+      "Content-Security-Policy",
+      "default-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'"
+    );
+    res.end(
+      '<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Sign-in expired</title></head><body><main><h1>Sign-in expired, try again</h1><p>Return to your app connection and choose Connect to start a new sign-in. This page will not retry automatically.</p></main></body></html>'
+    );
+  }
   async function begin(res, downstream) {
-    const validated = downstreamSchema.parse(downstream);
-    const clientId = await (registration ??= register());
-    const state = randomBytes(32).toString("base64url");
+    const validated = await signInStep(
+      "authorization-start",
+      () => downstreamSchema.parse(downstream)
+    );
+    const client = await clients.resolve(true, register);
+    const info = await metadata();
+    if (!info.authMethods.includes(client.authMethod))
+      throw new SignInError("configuration");
+    const binding = randomBytes(32).toString("base64url");
     const nonce = randomBytes(32).toString("base64url");
     const verifier = randomBytes(32).toString("base64url");
-    const encrypted = await new EncryptJWT({
-      purpose: "oidc-transaction",
-      clientId,
-      state,
+    const state = await new EncryptJWT2({
+      purpose: "oidc-transaction-v2",
+      clientId: client.clientId,
+      authMethod: client.authMethod,
+      redirectUri: client.redirectUri,
+      browserHash: digest(binding),
       nonce,
       verifier,
       downstream: validated
-    }).setProtectedHeader({
-      alg: "dir",
-      enc: "A256GCM",
-      typ: "oidc-transaction+jwt"
-    }).setIssuer(appIssuer).setAudience(callback).setIssuedAt().setExpirationTime(`${TTL}s`).encrypt(key);
-    if (Buffer.byteLength(encrypted) > COOKIE_LIMIT)
-      throw new Error("Transaction exceeds cookie budget");
-    const url = new URL((await metadata()).authorization);
+    }).setProtectedHeader({ alg: "dir", enc: "A256GCM", typ: "oidc-state+jwt" }).setIssuer(appIssuer).setAudience(callback).setIssuedAt().setExpirationTime(`${TTL}s`).encrypt(key);
+    if (Buffer.byteLength(state) > STATE_LIMIT)
+      throw new SignInError("authorization-start");
+    const url = new URL(info.authorization);
     url.search = new URLSearchParams({
-      client_id: clientId,
-      redirect_uri: callback,
+      client_id: client.clientId,
+      redirect_uri: client.redirectUri,
       response_type: "code",
       scope: "openid profile email",
       state,
       nonce,
-      code_challenge: createHash("sha256").update(verifier).digest("base64url"),
+      code_challenge: createHash2("sha256").update(verifier).digest("base64url"),
       code_challenge_method: "S256"
     }).toString();
-    cookie(res, encrypted, TTL);
+    if (Buffer.byteLength(url.href) > 16384)
+      throw new SignInError("authorization-start");
+    cookie(res, binding, TTL);
     res.statusCode = 302;
     res.setHeader("Location", url.href);
     res.end();
   }
-  async function complete(req, res, url) {
+  async function complete(req, res, url, context = callbackContext(req)) {
     cookie(res, "", 0);
-    if (Buffer.byteLength(req.headers.cookie ?? "") > 8192)
-      throw new Error("Invalid transaction cookie");
-    const matches = (req.headers.cookie ?? "").split(";").map((entry) => entry.trim()).filter((entry) => entry.startsWith(`${cookieName}=`));
-    if (matches.length !== 1) throw new Error("Missing transaction cookie");
-    const encrypted = matches[0]?.slice(cookieName.length + 1);
-    if (!encrypted || encrypted.length > COOKIE_LIMIT)
-      throw new Error("Invalid transaction cookie");
-    const { payload } = await jwtDecrypt(encrypted, key, {
-      issuer: appIssuer,
-      audience: callback,
-      keyManagementAlgorithms: ["dir"],
-      contentEncryptionAlgorithms: ["A256GCM"],
-      typ: "oidc-transaction+jwt",
-      requiredClaims: ["iat", "exp"],
-      maxTokenAge: TTL
-    });
-    if (typeof payload.exp !== "number" || typeof payload.iat !== "number" || payload.exp - payload.iat > TTL)
-      throw new Error("Invalid transaction lifetime");
-    const tx = transactionSchema.parse(payload);
     const params = url.searchParams;
-    for (const name of new Set(params.keys()))
-      if (params.getAll(name).length !== 1)
-        throw new Error("Duplicate callback parameter");
-    const state = opaque.parse(params.get("state"));
-    if (!equal(tx.state, state) || params.has("error") || params.has("iss") && params.get("iss") !== configuredIssuer)
-      throw new Error("Invalid callback state or issuer");
-    const code = boundedClaim(8192).parse(params.get("code"));
+    await signInStep("callback-parameters", () => {
+      for (const name of new Set(params.keys()))
+        if (params.getAll(name).length !== 1)
+          throw new SignInError("callback-parameters");
+      if (params.has("iss") && params.get("iss") !== configuredIssuer)
+        throw new SignInError("callback-parameters");
+    });
+    const tx = await signInStep("state-decrypt", async () => {
+      const encrypted = boundedClaim(STATE_LIMIT).parse(params.get("state"));
+      const { payload } = await jwtDecrypt2(encrypted, key, {
+        issuer: appIssuer,
+        audience: callback,
+        keyManagementAlgorithms: ["dir"],
+        contentEncryptionAlgorithms: ["A256GCM"],
+        typ: "oidc-state+jwt",
+        requiredClaims: ["iat", "exp"],
+        maxTokenAge: TTL
+      });
+      if (typeof payload.exp !== "number" || typeof payload.iat !== "number" || !Number.isSafeInteger(payload.iat) || !Number.isSafeInteger(payload.exp) || payload.exp <= payload.iat || payload.exp - payload.iat > TTL || payload.aud !== callback)
+        throw new SignInError("state-decrypt");
+      return transactionSchema.parse(payload);
+    });
+    context.stateMatch = true;
+    await signInStep("browser-binding", () => {
+      if (Buffer.byteLength(req.headers.cookie ?? "") > 8192)
+        throw new SignInError("browser-binding");
+      const matches = bindingCookies(req);
+      if (matches.length === 0) return;
+      context.cookieMatch = false;
+      if (matches.length !== 1) throw new SignInError("browser-binding");
+      const entry = matches[0];
+      if (!entry || !entry.includes("="))
+        throw new SignInError("browser-binding");
+      const binding = opaque.parse(entry.slice(entry.indexOf("=") + 1));
+      context.cookieMatch = equal(digest(binding), tx.browserHash);
+      if (!context.cookieMatch) throw new SignInError("browser-binding");
+    });
+    if (params.has("error"))
+      throw new SignInError(
+        "upstream-authorization",
+        params.get("error"),
+        params.get("error_description")
+      );
+    const code = await signInStep(
+      "callback-parameters",
+      () => boundedClaim(8192).parse(params.get("code"))
+    );
+    const client = await clients.resolve(false, register);
+    context.clientIdUsed = digest(client.clientId);
+    context.redirectUriUsed = digest(client.redirectUri);
+    context.redirectUriMatches = client.redirectUri === tx.redirectUri && tx.redirectUri === callback;
+    if (!equal(client.clientId, tx.clientId) || client.redirectUri !== tx.redirectUri || tx.redirectUri !== callback || client.authMethod !== tx.authMethod)
+      throw new SignInError("registration-binding");
     const info = await metadata();
-    const tokens = await request(info.token, {
+    if (!info.authMethods.includes(client.authMethod))
+      throw new SignInError("configuration");
+    const auth = clientAuthentication(client);
+    const tokens = await request("token-exchange", info.token, {
       method: "POST",
-      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      headers: {
+        "Content-Type": "application/x-www-form-urlencoded",
+        ...auth.headers
+      },
       body: new URLSearchParams({
         grant_type: "authorization_code",
         code,
-        client_id: tx.clientId,
-        redirect_uri: callback,
-        code_verifier: tx.verifier
+        redirect_uri: client.redirectUri,
+        code_verifier: tx.verifier,
+        ...auth.fields
       }).toString()
     });
-    const idToken = boundedClaim(16384).parse(tokens.id_token);
-    const accessToken = boundedClaim(16384).parse(tokens.access_token);
-    if (typeof tokens.token_type !== "string" || tokens.token_type.toLowerCase() !== "bearer")
-      throw new Error("Unsupported upstream token type");
-    const jwks = await request(info.jwks);
-    if (!Array.isArray(jwks.keys) || jwks.keys.length === 0 || jwks.keys.length > 20)
-      throw new Error("Invalid upstream JWKS");
-    const keys = jwks.keys.map((value) => {
-      const item = record(value);
-      const kty = boundedClaim(8).parse(item.kty);
-      if (!["OKP", "RSA", "EC"].includes(kty) || "d" in item || "k" in item)
-        throw new Error("Invalid public key");
-      return { ...item, kty };
+    const tokenPair = await signInStep("id-token-response", () => {
+      if (typeof tokens.token_type !== "string" || tokens.token_type.toLowerCase() !== "bearer")
+        throw new SignInError("id-token-response");
+      return {
+        idToken: boundedClaim(16384).parse(tokens.id_token),
+        accessToken: boundedClaim(16384).parse(tokens.access_token)
+      };
     });
-    const verified = await jwtVerify(idToken, createLocalJWKSet({ keys }), {
-      issuer: configuredIssuer,
-      audience: tx.clientId,
-      algorithms: info.algorithms,
-      requiredClaims: ["iss", "aud", "sub", "exp", "iat", "nonce"],
-      maxTokenAge: 600,
-      clockTolerance: 5
+    const jwks = await request("jwks", info.jwks);
+    const keySet = await signInStep("jwks", () => {
+      if (!Array.isArray(jwks.keys) || jwks.keys.length === 0 || jwks.keys.length > 20)
+        throw new SignInError("jwks");
+      const keys = jwks.keys.map((value) => {
+        const item = record(value);
+        const kty = boundedClaim(8).parse(item.kty);
+        if (!["OKP", "RSA", "EC"].includes(kty) || "d" in item || "k" in item)
+          throw new SignInError("jwks");
+        return { ...item, kty };
+      });
+      return createLocalJWKSet({ keys });
     });
-    const claims = verified.payload;
-    if (claims.aud !== tx.clientId || claims.azp !== void 0 && claims.azp !== tx.clientId || !equal(opaque.parse(claims.nonce), tx.nonce))
-      throw new Error("Invalid upstream ID token binding");
-    const sub = boundedClaim(256).parse(claims.sub);
-    const userinfo = await request(info.userinfo, {
-      headers: { Authorization: `Bearer ${accessToken}` }
+    const claims = await signInStep("id-token-verification", async () => {
+      const verified = await jwtVerify(tokenPair.idToken, keySet, {
+        issuer: configuredIssuer,
+        audience: client.clientId,
+        algorithms: info.algorithms,
+        requiredClaims: ["iss", "aud", "sub", "exp", "iat"],
+        maxTokenAge: 600,
+        clockTolerance: 5
+      });
+      if (verified.payload.aud !== client.clientId || verified.payload.azp !== void 0 && verified.payload.azp !== client.clientId)
+        throw new SignInError("id-token-verification");
+      return verified.payload;
     });
-    if (userinfo.sub !== sub) throw new Error("Userinfo subject mismatch");
-    const org = boundedClaim(256).parse(claims[ORG_CLAIM]);
+    await signInStep("nonce-validation", () => {
+      if (!equal(opaque.parse(claims.nonce), tx.nonce))
+        throw new SignInError("nonce-validation");
+    });
+    const sub = await signInStep(
+      "subject-validation",
+      () => boundedClaim(256).parse(claims.sub)
+    );
+    const userinfo = await request("userinfo", info.userinfo, {
+      headers: { Authorization: `Bearer ${tokenPair.accessToken}` }
+    });
+    if (userinfo.sub !== sub) throw new SignInError("userinfo-subject");
+    if (claims[ORG_CLAIM] === void 0 || claims[ORG_CLAIM] === null)
+      throw new SignInError("missing-org-claim");
+    const org = await signInStep(
+      "org-claim-validation",
+      () => boundedClaim(256).parse(claims[ORG_CLAIM])
+    );
     if (userinfo[ORG_CLAIM] !== void 0 && userinfo[ORG_CLAIM] !== org || userinfo.org_id !== void 0 && userinfo.org_id !== org)
-      throw new Error("Userinfo organization mismatch");
-    const identity = realIdentitySchema.parse({
-      identityMode: "openwork",
-      sub,
-      name: claims.name ?? userinfo.name,
-      email: claims.email ?? userinfo.email,
-      org_id: org
-    });
+      throw new SignInError("org-claim-validation");
+    const identity = await signInStep(
+      "profile-claims",
+      () => realIdentitySchema.parse({
+        identityMode: "openwork",
+        sub,
+        name: claims.name ?? userinfo.name,
+        email: claims.email ?? userinfo.email,
+        org_id: org
+      })
+    );
     return { downstream: tx.downstream, identity };
   }
-  return { begin, complete };
+  return { begin, complete, report, failure, success, callbackContext };
 }
 
 // server/oauth.ts
@@ -546,11 +1003,12 @@ function createOAuth(options = {}) {
   const upstream = identityMode === "openwork" ? createUpstream(
     issuer,
     privateKey,
-    options.upstreamIssuer ?? process.env.UPSTREAM_ISSUER
+    options.upstreamIssuer ?? process.env.UPSTREAM_ISSUER,
+    options.upstreamOptions
   ) : void 0;
   const description = identityMode === "demo" ? "demo authorization server: accepts every request; codes are short-lived, not single-use" : "OpenWork OIDC identity; synthetic work data; downstream codes are short-lived, not single-use";
   const publicKey = createPublicKey(privateKey);
-  const kid = createHash2("sha256").update(publicKey.export({ format: "der", type: "spki" })).digest("base64url");
+  const kid = createHash3("sha256").update(publicKey.export({ format: "der", type: "spki" })).digest("base64url");
   const resource = `${issuer}/mcp`;
   const audiences = { code: `${issuer}/token`, access: resource };
   const lifetimes = { code: CODE_TTL, access: ACCESS_TTL };
@@ -613,7 +1071,7 @@ function createOAuth(options = {}) {
       throw new Error("Invalid token");
     return payload;
   }
-  const redirectHash = (redirect) => createHash2("sha256").update(`demo-dcr-v1\0${issuer}\0${redirect}`).digest().subarray(0, 16).toString("base64url");
+  const redirectHash = (redirect) => createHash3("sha256").update(`demo-dcr-v1\0${issuer}\0${redirect}`).digest().subarray(0, 16).toString("base64url");
   async function registerClientId(redirects) {
     const payload = {
       r: redirects.map(redirectHash),
@@ -739,7 +1197,8 @@ function createOAuth(options = {}) {
     if (upstream) {
       try {
         await upstream.begin(res, downstream);
-      } catch {
+      } catch (error) {
+        upstream.report(error, "authorization-start");
         throw new OAuthError(502, "upstream_unavailable");
       }
     } else await issueCode(res, downstream, { sub: randomUUID() });
@@ -768,7 +1227,7 @@ function createOAuth(options = {}) {
       identityClaims(claims);
       if (claims.client_id !== clientId || claims.redirect_uri !== redirect || claims.resource !== resource || claims.scope !== SCOPE || claims.code_challenge_method !== "S256" || typeof claims.code_challenge !== "string" || !/^[A-Za-z0-9_-]{43}$/.test(claims.code_challenge) || !/^[A-Za-z0-9._~-]{43,128}$/.test(verifier))
         throw new Error();
-      const actual = createHash2("sha256").update(verifier).digest("base64url");
+      const actual = createHash3("sha256").update(verifier).digest("base64url");
       if (!timingSafeEqual2(
         Buffer.from(actual),
         Buffer.from(claims.code_challenge)
@@ -807,6 +1266,7 @@ function createOAuth(options = {}) {
     res.setHeader("Pragma", "no-cache");
     res.setHeader("X-Content-Type-Options", "nosniff");
     res.setHeader("Referrer-Policy", "no-referrer");
+    const callbackTrace = path === CALLBACK_PATH && upstream ? upstream.callbackContext(req) : void 0;
     try {
       if (req.method !== routes.get(path)) {
         res.setHeader("Allow", routes.get(path) ?? "GET");
@@ -823,11 +1283,13 @@ function createOAuth(options = {}) {
           const result = await upstream.complete(
             req,
             res,
-            new URL(req.url ?? path, issuer)
+            new URL(req.url ?? path, issuer),
+            callbackTrace
           );
           await issueCode(res, result.downstream, result.identity);
-        } catch {
-          invalid("invalid_grant");
+          upstream.success(callbackTrace);
+        } catch (error) {
+          upstream.failure(res, error, "downstream-code", callbackTrace);
         }
       } else if (path === "/token") await token(req, res);
       else if (path === "/jwks.json" || path === "/.well-known/jwks.json")
@@ -837,6 +1299,10 @@ function createOAuth(options = {}) {
       else json(res, 200, metadata.protectedResource);
     } catch (error) {
       if (!res.headersSent) {
+        if (path === CALLBACK_PATH && upstream) {
+          upstream.failure(res, error, "callback-parameters", callbackTrace);
+          return true;
+        }
         if (error instanceof OAuthError && error.status === 413)
           res.setHeader("Connection", "close");
         json(res, error instanceof OAuthError ? error.status : 500, {
@@ -850,7 +1316,7 @@ function createOAuth(options = {}) {
 }
 
 // server/provider.ts
-import { createHash as createHash3, randomUUID as randomUUID2 } from "node:crypto";
+import { createHash as createHash4, randomUUID as randomUUID2 } from "node:crypto";
 var people = [
   {
     name: "Maya Chen",
@@ -892,7 +1358,7 @@ var people = [
   }
 ];
 function profileForSubject(sub) {
-  const hash = createHash3("sha256").update(sub).digest("hex");
+  const hash = createHash4("sha256").update(sub).digest("hex");
   const person = people[Number.parseInt(hash.slice(0, 8), 16) % people.length];
   if (!person) throw new Error("Missing fixture");
   const fingerprint = hash.slice(0, 12);
@@ -914,7 +1380,7 @@ function profileForIdentity(identity) {
     firstName: parts[0] || identity.name,
     role: "OpenWork member",
     avatar: parts.slice(0, 2).map((part) => Array.from(part)[0]).join("").toUpperCase(),
-    fingerprint: createHash3("sha256").update(JSON.stringify([identity.org_id, identity.sub])).digest("hex").slice(0, 12),
+    fingerprint: createHash4("sha256").update(JSON.stringify([identity.org_id, identity.sub])).digest("hex").slice(0, 12),
     subjectShort: identity.sub.slice(0, 12),
     identityMode: "openwork",
     synthetic: false,
@@ -1138,7 +1604,7 @@ import {
   registerAppTool,
   RESOURCE_MIME_TYPE
 } from "@modelcontextprotocol/ext-apps/server";
-import { z as z3 } from "zod";
+import { z as z4 } from "zod";
 function registerView(server, id, loadHtml) {
   const uri = resourceUri(id);
   registerAppResource(
@@ -1165,7 +1631,7 @@ function registerWidget(server, id, options) {
     {
       title: definitions[id].title,
       description: `Open or refresh ${definitions[id].title}. Synthetic demo data; no customer services connected.`,
-      inputSchema: z3.object({}).strict(),
+      inputSchema: z4.object({}).strict(),
       outputSchema: schemas[id],
       annotations: {
         readOnlyHint: true,

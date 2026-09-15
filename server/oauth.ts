@@ -16,6 +16,7 @@ import {
   realIdentitySchema,
   type DownstreamRequest,
   type OpenWorkIdentity,
+  type UpstreamOptions,
 } from "./upstream.ts";
 
 export type OAuthOptions = {
@@ -23,6 +24,7 @@ export type OAuthOptions = {
   privateKeyPem?: string;
   identityMode?: "openwork" | "demo";
   upstreamIssuer?: string;
+  upstreamOptions?: UpstreamOptions;
 };
 export type AccessIdentity = { sub: string } | OpenWorkIdentity;
 const SCOPE = "home:read";
@@ -205,6 +207,7 @@ export function createOAuth(options: OAuthOptions = {}) {
           issuer,
           privateKey,
           options.upstreamIssuer ?? process.env.UPSTREAM_ISSUER,
+          options.upstreamOptions,
         )
       : undefined;
   const description =
@@ -469,7 +472,8 @@ export function createOAuth(options: OAuthOptions = {}) {
     if (upstream) {
       try {
         await upstream.begin(res, downstream);
-      } catch {
+      } catch (error) {
+        upstream.report(error, "authorization-start");
         throw new OAuthError(502, "upstream_unavailable");
       }
     } else await issueCode(res, downstream, { sub: randomUUID() });
@@ -558,6 +562,10 @@ export function createOAuth(options: OAuthOptions = {}) {
     res.setHeader("Pragma", "no-cache");
     res.setHeader("X-Content-Type-Options", "nosniff");
     res.setHeader("Referrer-Policy", "no-referrer");
+    const callbackTrace =
+      path === CALLBACK_PATH && upstream
+        ? upstream.callbackContext(req)
+        : undefined;
     try {
       if (req.method !== routes.get(path)) {
         res.setHeader("Allow", routes.get(path) ?? "GET");
@@ -575,10 +583,12 @@ export function createOAuth(options: OAuthOptions = {}) {
             req,
             res,
             new URL(req.url ?? path, issuer),
+            callbackTrace,
           );
           await issueCode(res, result.downstream, result.identity);
-        } catch {
-          invalid("invalid_grant");
+          upstream.success(callbackTrace);
+        } catch (error) {
+          upstream.failure(res, error, "downstream-code", callbackTrace);
         }
       } else if (path === "/token") await token(req, res);
       else if (path === "/jwks.json" || path === "/.well-known/jwks.json")
@@ -588,6 +598,10 @@ export function createOAuth(options: OAuthOptions = {}) {
       else json(res, 200, metadata.protectedResource);
     } catch (error) {
       if (!res.headersSent) {
+        if (path === CALLBACK_PATH && upstream) {
+          upstream.failure(res, error, "callback-parameters", callbackTrace);
+          return true;
+        }
         if (error instanceof OAuthError && error.status === 413)
           res.setHeader("Connection", "close");
         json(res, error instanceof OAuthError ? error.status : 500, {

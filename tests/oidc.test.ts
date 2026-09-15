@@ -31,6 +31,11 @@ import {
 import { WidgetController } from "../src/controller.ts";
 import { Dashboard } from "../src/ui.tsx";
 import { verifyHosted } from "../scripts/verify-hosted.ts";
+import { MemoryRegistrationCache } from "./registration-fixture.ts";
+import type { SignInDiagnostic } from "../server/oidc-errors.ts";
+const caches = new Map<string, MemoryRegistrationCache>();
+const fingerprint = (value: string) =>
+  createHash("sha256").update(value).digest("hex");
 
 const home = "home";
 const appIssuer = "https://employee.example.test";
@@ -90,7 +95,14 @@ async function listen(
 }
 async function stub(t: TestContext) {
   const pair = generateKeyPairSync("ed25519");
-  const clients = new Map<string, string>();
+  const clients = new Map<
+    string,
+    {
+      redirectUri: string;
+      authMethod: "none" | "client_secret_post" | "client_secret_basic";
+      clientSecret?: string;
+    }
+  >();
   const codes = new Map<
     string,
     {
@@ -107,8 +119,17 @@ async function stub(t: TestContext) {
     omit: string[];
     metadataPatch: Record<string, unknown>;
     userinfoPatch: Record<string, unknown>;
-  } = { patch: {}, omit: [], metadataPatch: {}, userinfoPatch: {} };
+    tokenError: { error: string; error_description: string } | null;
+  } = {
+    patch: {},
+    omit: [],
+    metadataPatch: {},
+    userinfoPatch: {},
+    tokenError: null,
+  };
+  const controls: { beforeToken?: () => Promise<void> } = {};
   const state = {
+    ...controls,
     user: alice,
     registrations: 0,
     discoveryCalls: 0,
@@ -147,7 +168,11 @@ async function stub(t: TestContext) {
           jwks_uri: `${issuer}/jwks`,
           userinfo_endpoint: `${issuer}/userinfo`,
           code_challenge_methods_supported: ["S256"],
-          token_endpoint_auth_methods_supported: ["none"],
+          token_endpoint_auth_methods_supported: [
+            "none",
+            "client_secret_post",
+            "client_secret_basic",
+          ],
           id_token_signing_alg_values_supported: ["EdDSA"],
           ...state.metadataPatch,
         });
@@ -162,7 +187,7 @@ async function stub(t: TestContext) {
         const callback = text(registration.redirect_uris[0]);
         assert.equal(callback, `${appIssuer}${CALLBACK_PATH}`);
         const client = randomUUID();
-        clients.set(client, callback);
+        clients.set(client, { redirectUri: callback, authMethod: "none" });
         state.registrations++;
         json(res, 201, {
           client_id: client,
@@ -174,7 +199,7 @@ async function stub(t: TestContext) {
       if (url.pathname === "/oidc/authorize") {
         const client = text(url.searchParams.get("client_id"));
         const callback = text(url.searchParams.get("redirect_uri"));
-        assert.equal(clients.get(client), callback);
+        assert.equal(clients.get(client)?.redirectUri, callback);
         assert.equal(url.searchParams.get("code_challenge_method"), "S256");
         assert.equal(url.searchParams.get("scope"), "openid profile email");
         const code = randomUUID();
@@ -198,13 +223,43 @@ async function stub(t: TestContext) {
       }
       if (url.pathname === "/oidc/token") {
         state.tokenCalls++;
+        await state.beforeToken?.();
         const params = new URLSearchParams(await body(req));
+        let clientId = params.get("client_id");
+        let basicSecret: string | null = null;
+        if (req.headers.authorization?.startsWith("Basic ")) {
+          const parts = Buffer.from(
+            req.headers.authorization.slice(6),
+            "base64",
+          )
+            .toString("utf8")
+            .split(":");
+          assert.equal(parts.length, 2);
+          clientId = new URLSearchParams(`value=${parts[0]}`).get("value");
+          basicSecret = new URLSearchParams(`value=${parts[1]}`).get("value");
+          assert.equal(params.has("client_id"), false);
+          assert.equal(params.has("client_secret"), false);
+        }
+        const credentials = clients.get(clientId ?? "");
+        const authenticated =
+          credentials?.authMethod === "client_secret_basic"
+            ? basicSecret === credentials.clientSecret
+            : credentials?.authMethod === "client_secret_post"
+              ? req.headers.authorization === undefined &&
+                params.get("client_secret") === credentials.clientSecret
+              : credentials?.authMethod === "none" &&
+                req.headers.authorization === undefined &&
+                !params.has("client_secret");
+        if (!authenticated) {
+          json(res, 400, { error: "invalid_client" });
+          return;
+        }
         const code = text(params.get("code"));
         const saved = codes.get(code);
         codes.delete(code);
         if (
           !saved ||
-          saved.client !== params.get("client_id") ||
+          saved.client !== clientId ||
           saved.redirect !== params.get("redirect_uri") ||
           params.get("grant_type") !== "authorization_code"
         ) {
@@ -219,6 +274,10 @@ async function stub(t: TestContext) {
         ) {
           state.pkceFailures++;
           json(res, 400, { error: "invalid_grant" });
+          return;
+        }
+        if (state.tokenError) {
+          json(res, 400, state.tokenError);
           return;
         }
         if (state.largeToken) {
@@ -290,10 +349,37 @@ async function stub(t: TestContext) {
     })().catch(() => json(res, 500, { error: "stub_failed" }));
   });
   issuer = `${base}/oidc`;
-  return { issuer, state, privateKey: pair.privateKey };
+  function manualClient(
+    authMethod: "none" | "client_secret_post" | "client_secret_basic",
+    clientSecret?: string,
+  ): NodeJS.ProcessEnv {
+    const clientId = randomUUID();
+    const redirectUri = `${appIssuer}${CALLBACK_PATH}`;
+    clients.set(clientId, { redirectUri, authMethod, clientSecret });
+    return {
+      UPSTREAM_CLIENT_ID: clientId,
+      UPSTREAM_CLIENT_AUTH_METHOD: authMethod,
+      UPSTREAM_CLIENT_ISSUER: issuer,
+      UPSTREAM_CLIENT_REDIRECT_URI: redirectUri,
+      ...(clientSecret === undefined
+        ? {}
+        : { UPSTREAM_CLIENT_SECRET: clientSecret }),
+    };
+  }
+  return { issuer, state, privateKey: pair.privateKey, manualClient };
 }
 async function app(t: TestContext, issuer: string, extra: HandlerOptions = {}) {
+  let cache = caches.get(issuer);
+  if (!cache) {
+    cache = new MemoryRegistrationCache();
+    caches.set(issuer, cache);
+  }
   const handler = createHandler({
+    upstreamOptions: {
+      env: {},
+      registrationCache: cache,
+      diagnostics: () => {},
+    },
     issuer: appIssuer,
     privateKeyPem,
     upstreamIssuer: issuer,
@@ -436,10 +522,295 @@ const rows = (value: Payload) =>
       : value.goals;
 async function rejected(response: Response) {
   assert.equal(response.status, 400);
-  assert.deepEqual(await response.json(), { error: "invalid_grant" });
+  assert.match(text(response.headers.get("content-type")), /^text\/html/);
+  const html = await response.text();
+  assert.ok(html.includes("Sign-in expired, try again"));
+  assert.ok(
+    !html.includes("<script") &&
+      !html.includes("http") &&
+      !html.includes("invalid_grant"),
+  );
+  assert.equal(response.headers.get("cache-control"), "no-store");
   assert.equal(response.headers.get("location"), null);
   assert.match(text(response.headers.get("set-cookie")), /Max-Age=0/);
 }
+
+test("missing binding cookie succeeds across instances with authenticated state and both PKCE legs", async (t) => {
+  const upstream = await stub(t);
+  const diagnostics: SignInDiagnostic[] = [];
+  const options = {
+    env: upstream.manualClient("none"),
+    diagnostics: (value: SignInDiagnostic) => diagnostics.push(value),
+  };
+  const base = await app(t, upstream.issuer, { upstreamOptions: options });
+  const other = await app(t, upstream.issuer, { upstreamOptions: options });
+  for (const cookie of ["", "unrelated=fixture"]) {
+    const start = await upstreamApproval(await begin(base));
+    const completed = await callback(other, start, cookie);
+    assert.equal(completed.status, 302);
+    const destination = new URL(text(completed.headers.get("location")));
+    assert.equal(destination.searchParams.get("state"), "downstream-state");
+    const code = text(destination.searchParams.get("code"));
+    assert.equal(
+      (
+        await exchange(base, start.client, code, {
+          code_verifier: "w".repeat(43),
+        })
+      ).status,
+      400,
+    );
+    const redeemed = await exchange(base, start.client, code);
+    assert.equal(redeemed.status, 200);
+    assert.equal(
+      decodeJwt(text(record(await redeemed.json()).access_token)).sub,
+      alice.sub,
+    );
+    assert.deepEqual(diagnostics.at(-1), {
+      stage: "callback-complete",
+      error: "none",
+      error_description: "none",
+      cookiePresent: false,
+      stateMatch: true,
+      redirectUriMatches: true,
+      clientIdUsed: fingerprint(text(options.env.UPSTREAM_CLIENT_ID)),
+      redirectUriUsed: fingerprint(`${appIssuer}${CALLBACK_PATH}`),
+    });
+  }
+  assert.equal(upstream.state.registrations, 0);
+});
+
+test("present wrong or malformed binding cookie is rejected, never treated as absent", async (t) => {
+  const upstream = await stub(t);
+  const diagnostics: SignInDiagnostic[] = [];
+  const base = await app(t, upstream.issuer, {
+    upstreamOptions: {
+      env: upstream.manualClient("none"),
+      diagnostics: (value) => diagnostics.push(value),
+    },
+  });
+  const start = await upstreamApproval(await begin(base));
+  for (const cookie of [
+    "__Host-openwork-binding=wrong",
+    "__Host-openwork-binding",
+    "__Host-openwork-binding =wrong",
+  ]) {
+    await rejected(await callback(base, start, cookie));
+    assert.deepEqual(diagnostics.at(-1), {
+      stage: "browser-binding",
+      error: "redacted",
+      error_description: "redacted",
+      cookiePresent: true,
+      stateMatch: true,
+      redirectUriMatches: false,
+      cookieMatch: false,
+    });
+  }
+  assert.equal(upstream.state.tokenCalls, 0);
+});
+
+test("overlapping callback success/failure diagnostics remain request scoped with immutable hash-only snapshots", async (t) => {
+  const upstream = await stub(t);
+  const diagnostics: SignInDiagnostic[] = [];
+  const env = upstream.manualClient("none");
+  const base = await app(t, upstream.issuer, {
+    upstreamOptions: { env, diagnostics: (value) => diagnostics.push(value) },
+  });
+  const withCookie = await upstreamApproval(await begin(base));
+  upstream.state.user = bob;
+  const withoutCookie = await upstreamApproval(await begin(base));
+  let release = () => {};
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  let arrivals = 0;
+  upstream.state.beforeToken = async () => {
+    if (++arrivals === 2) release();
+    await gate;
+  };
+  const invalid = new URL(withCookie.callback);
+  invalid.searchParams.set("state", "invalid-fixture");
+  const [one, two, bad] = await Promise.all([
+    callback(base, withCookie),
+    callback(base, withoutCookie, ""),
+    callback(base, withCookie, withCookie.cookie, invalid),
+  ]);
+  assert.equal(one.status, 302);
+  assert.equal(two.status, 302);
+  await rejected(bad);
+  assert.equal(arrivals, 2);
+  assert.equal(diagnostics.length, 3);
+  assert.equal(new Set(diagnostics).size, 3);
+  const present = diagnostics.find(
+    (value) => value.stage === "callback-complete" && value.cookiePresent,
+  );
+  const absent = diagnostics.find(
+    (value) => value.stage === "callback-complete" && !value.cookiePresent,
+  );
+  const failure = diagnostics.find((value) => value.stage === "state-decrypt");
+  assert.ok(present && absent && failure);
+  assert.equal(present.cookieMatch, true);
+  assert.equal(absent.cookieMatch, undefined);
+  for (const summary of [present, absent]) {
+    assert.equal(summary.stateMatch, true);
+    assert.equal(summary.redirectUriMatches, true);
+    assert.equal(
+      summary.clientIdUsed,
+      fingerprint(text(env.UPSTREAM_CLIENT_ID)),
+    );
+    assert.equal(
+      summary.redirectUriUsed,
+      fingerprint(`${appIssuer}${CALLBACK_PATH}`),
+    );
+  }
+  assert.deepEqual(failure, {
+    stage: "state-decrypt",
+    error: "redacted",
+    error_description: "redacted",
+    cookiePresent: true,
+    stateMatch: false,
+    redirectUriMatches: false,
+  });
+  const serialized = JSON.stringify(diagnostics);
+  for (const value of [
+    text(env.UPSTREAM_CLIENT_ID),
+    appIssuer,
+    withCookie.cookie,
+    text(withCookie.callback.searchParams.get("state")),
+    alice.email,
+    bob.email,
+    alice.org_id,
+  ])
+    assert.ok(!serialized.includes(value));
+});
+
+test("environment client wins over Blob and supports exact public/post/basic authentication across fresh instances", async (t) => {
+  const upstream = await stub(t);
+  upstream.state.metadataPatch = { registration_endpoint: undefined };
+  for (const method of [
+    "none",
+    "client_secret_post",
+    "client_secret_basic",
+  ] as const) {
+    const env = upstream.manualClient(
+      method,
+      method === "none" ? undefined : "synthetic secret:+/&",
+    );
+    const registrationCache = {
+      read: async (): Promise<string | null> => {
+        throw new Error("Must not read Blob");
+      },
+      create: async () => {
+        throw new Error("Must not create Blob");
+      },
+    };
+    const options = { env, registrationCache, diagnostics: () => {} };
+    const base = await app(t, upstream.issuer, { upstreamOptions: options });
+    const other = await app(t, upstream.issuer, { upstreamOptions: options });
+    const valid = await flow(base, other);
+    assert.equal(decodeJwt(valid.token).name, alice.name);
+    assert.equal(
+      valid.started.upstreamUrl.searchParams.get("client_id"),
+      env.UPSTREAM_CLIENT_ID,
+    );
+    assert.equal(
+      valid.started.upstreamUrl.searchParams.get("redirect_uri"),
+      env.UPSTREAM_CLIENT_REDIRECT_URI,
+    );
+  }
+  const firstEnv = upstream.manualClient("none");
+  const secondEnv = upstream.manualClient("none");
+  const first = await app(t, upstream.issuer, {
+    upstreamOptions: { env: firstEnv, diagnostics: () => {} },
+  });
+  const second = await app(t, upstream.issuer, {
+    upstreamOptions: { env: secondEnv, diagnostics: () => {} },
+  });
+  const started = await upstreamApproval(await begin(first));
+  const before = upstream.state.tokenCalls;
+  await rejected(await callback(second, started));
+  assert.equal(upstream.state.tokenCalls, before);
+  assert.equal(upstream.state.registrations, 0);
+});
+
+test("staged diagnostics distinguish token rejection from missing org and remain redacted; callbacks consume binding without retry", async (t) => {
+  const upstream = await stub(t);
+  const diagnostics: SignInDiagnostic[] = [];
+  const registrationCache = new MemoryRegistrationCache();
+  const base = await app(t, upstream.issuer, {
+    upstreamOptions: {
+      env: {},
+      registrationCache,
+      diagnostics: (value) => diagnostics.push(value),
+    },
+  });
+  upstream.state.tokenError = {
+    error: "invalid_grant",
+    error_description: "Invalid code verifier",
+  };
+  const rejectedFlow = await upstreamApproval(await begin(base));
+  await rejected(await callback(base, rejectedFlow));
+  assert.deepEqual(diagnostics.at(-1), {
+    stage: "token-exchange",
+    error: "invalid_grant",
+    error_description: "invalid code verifier",
+    status: 400,
+    cookiePresent: true,
+    stateMatch: true,
+    cookieMatch: true,
+    redirectUriMatches: true,
+    clientIdUsed: fingerprint(
+      text(rejectedFlow.upstreamUrl.searchParams.get("client_id")),
+    ),
+    redirectUriUsed: fingerprint(`${appIssuer}${CALLBACK_PATH}`),
+  });
+  assert.equal(upstream.state.tokenCalls, 1);
+  await rejected(await callback(base, rejectedFlow, ""));
+  assert.equal(diagnostics.at(-1)?.stage, "token-exchange");
+  assert.equal(diagnostics.at(-1)?.cookiePresent, false);
+  assert.equal(diagnostics.at(-1)?.stateMatch, true);
+  assert.equal(diagnostics.at(-1)?.cookieMatch, undefined);
+  assert.equal(upstream.state.tokenCalls, 2);
+  const hostile = `token=${upstream.state.lastIdToken} code=${rejectedFlow.client} cookie=${rejectedFlow.cookie} ${alice.email} ${alice.org_id}\nhttps://example.test/private`;
+  upstream.state.tokenError = {
+    error: "invalid_grant",
+    error_description: hostile,
+  };
+  await rejected(
+    await callback(base, await upstreamApproval(await begin(base))),
+  );
+  assert.equal(diagnostics.at(-1)?.error_description, "redacted");
+  assert.ok(!JSON.stringify(diagnostics).includes(rejectedFlow.client));
+  assert.ok(!JSON.stringify(diagnostics).includes(alice.email));
+  assert.ok(!JSON.stringify(diagnostics).includes("https://"));
+  upstream.state.tokenError = null;
+  upstream.state.omit = [ORG_CLAIM];
+  await rejected(
+    await callback(base, await upstreamApproval(await begin(base))),
+  );
+  assert.equal(diagnostics.at(-1)?.stage, "missing-org-claim");
+  upstream.state.omit = [];
+  const valid = await flow(base);
+  const calls = upstream.state.tokenCalls;
+  await rejected(await callback(base, valid.started));
+  assert.equal(upstream.state.tokenCalls, calls + 1);
+  assert.equal(diagnostics.at(-1)?.stage, "token-exchange");
+  assert.equal(decodeJwt((await flow(base)).token).sub, alice.sub);
+});
+
+test("missing stable client configuration fails closed without discovery or DCR", async (t) => {
+  const upstream = await stub(t);
+  const diagnostics: SignInDiagnostic[] = [];
+  const base = await app(t, upstream.issuer, {
+    upstreamOptions: {
+      env: {},
+      diagnostics: (value) => diagnostics.push(value),
+    },
+  });
+  assert.equal((await begin(base)).response.status, 502);
+  assert.equal(diagnostics.at(-1)?.stage, "configuration");
+  assert.equal(upstream.state.discoveryCalls, 0);
+  assert.equal(upstream.state.registrations, 0);
+});
 
 test("hosted verifier reports real identity proof incomplete without attempting DCR or sign-in", () => {
   const oauth = createOAuth({
@@ -501,12 +872,18 @@ test("real OIDC maps verified name/email/org/sub and survives callback on anothe
   await flow(other);
   assert.equal(
     upstream.state.registrations,
-    2,
-    "Cold instance registers once when starting its own authorization",
+    1,
+    "Fresh instance reads the persisted original registration",
   );
   const cookie = text(result.started.response.headers.get("set-cookie"));
+  assert.ok(!/Domain=|SameSite=Strict/i.test(cookie));
+  const binding = result.started.cookie.slice(
+    result.started.cookie.indexOf("=") + 1,
+  );
+  assert.equal(Buffer.byteLength(binding), 43);
+  assert.match(binding, /^[A-Za-z0-9_-]{43}$/);
   for (const flag of [
-    "__Host-openwork-transaction=",
+    "__Host-openwork-binding=",
     "HttpOnly",
     "SameSite=Lax",
     "Secure",
@@ -633,10 +1010,13 @@ test("state, browser cookie, duplicate parameters and swapped transactions fail 
   const wrong = new URL(a.callback);
   wrong.searchParams.set("state", "x".repeat(43));
   await rejected(await callback(base, a, a.cookie, wrong));
-  await rejected(await callback(base, a, ""));
   await rejected(await callback(base, a, b.cookie));
   await rejected(await callback(base, a, `${a.cookie}; ${a.cookie}`));
-  const damaged = a.cookie.replace(/=./, "=X");
+  const equals = a.cookie.indexOf("=");
+  const damaged =
+    a.cookie.slice(0, equals + 1) +
+    (a.cookie[equals + 1] === "A" ? "B" : "A") +
+    a.cookie.slice(equals + 2);
   await rejected(await callback(base, a, damaged));
   const duplicate = new URL(a.callback);
   duplicate.searchParams.append(
@@ -696,22 +1076,41 @@ test("encrypted transaction expiry, key/issuer binding and callback size limits 
       "sha256",
       privateKey.export({ type: "pkcs8", format: "der" }),
       Buffer.from(appIssuer),
-      Buffer.from(`employee-home-oidc-transaction-v1\0${upstream.issuer}`),
+      Buffer.from(`employee-home-oidc-state-v2\0${upstream.issuer}`),
       32,
     ),
   );
-  const cookieValue = start.cookie.slice(start.cookie.indexOf("=") + 1);
-  const { payload } = await jwtDecrypt(cookieValue, key);
+  const stateValue = text(start.callback.searchParams.get("state"));
+  const { payload } = await jwtDecrypt(stateValue, key);
+  const tx = record(payload);
+  assert.equal(record(tx.downstream).client_id, start.client);
+  assert.equal(record(tx.downstream).redirect_uri, redirect);
+  assert.equal(tx.redirectUri, `${appIssuer}${CALLBACK_PATH}`);
+  assert.equal(
+    createHash("sha256").update(text(tx.verifier)).digest("base64url"),
+    start.upstreamUrl.searchParams.get("code_challenge"),
+  );
+  assert.equal(tx.nonce, start.upstreamUrl.searchParams.get("nonce"));
+  assert.match(
+    start.cookie.slice(start.cookie.indexOf("=") + 1),
+    /^[A-Za-z0-9_-]{43}$/,
+  );
   const expired = await new EncryptJWT({ ...payload, iat: 1, exp: 2 })
     .setProtectedHeader({
       alg: "dir",
       enc: "A256GCM",
-      typ: "oidc-transaction+jwt",
+      typ: "oidc-state+jwt",
     })
     .encrypt(key);
-  await rejected(
-    await callback(base, start, `__Host-openwork-transaction=${expired}`),
+  const expiredUrl = new URL(start.callback);
+  expiredUrl.searchParams.set("state", expired);
+  await rejected(await callback(base, start, start.cookie, expiredUrl));
+  const tampered = new URL(start.callback);
+  tampered.searchParams.set(
+    "state",
+    (stateValue[0] === "A" ? "B" : "A") + stateValue.slice(1),
   );
+  await rejected(await callback(base, start, start.cookie, tampered));
   const otherKey = generateKeyPairSync("ed25519")
     .privateKey.export({ type: "pkcs8", format: "pem" })
     .toString();

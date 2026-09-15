@@ -95,31 +95,55 @@ var homeOutputSchema = z.discriminatedUnion("kind", [
 import { jwtVerify as jwtVerify2, SignJWT } from "jose";
 
 // server/upstream.ts
-import { createLocalJWKSet, EncryptJWT, jwtDecrypt, jwtVerify } from "jose";
+import { createLocalJWKSet, EncryptJWT as EncryptJWT2, jwtDecrypt as jwtDecrypt2, jwtVerify } from "jose";
+import { z as z3 } from "zod";
+
+// server/upstream-client.ts
+import { BlobNotFoundError, get, put } from "@vercel/blob";
+import { EncryptJWT, jwtDecrypt } from "jose";
 import { z as z2 } from "zod";
-var RESPONSE_LIMIT = 64 * 1024;
-var opaque = z2.string().regex(/^[A-Za-z0-9_-]{43}$/);
-var boundedClaim = (max) => z2.string().min(1).max(max).refine(
+var field = (max) => z2.string().min(1).max(max).refine(
   (value) => value.trim().length > 0 && !/[\u0000-\u001f\u007f]/.test(value)
 );
-var realIdentitySchema = z2.object({
-  identityMode: z2.literal("openwork"),
+var authMethodSchema = z2.enum([
+  "none",
+  "client_secret_post",
+  "client_secret_basic"
+]);
+var registrationSchema = z2.object({
+  clientId: field(512),
+  clientSecret: field(4096).optional(),
+  authMethod: authMethodSchema,
+  issuer: field(2048),
+  redirectUri: field(2048)
+});
+
+// server/upstream.ts
+var RESPONSE_LIMIT = 64 * 1024;
+var opaque = z3.string().regex(/^[A-Za-z0-9_-]{43}$/);
+var boundedClaim = (max) => z3.string().min(1).max(max).refine(
+  (value) => value.trim().length > 0 && !/[\u0000-\u001f\u007f]/.test(value)
+);
+var realIdentitySchema = z3.object({
+  identityMode: z3.literal("openwork"),
   sub: boundedClaim(256),
   name: boundedClaim(256),
   email: boundedClaim(320),
   org_id: boundedClaim(256)
 });
-var downstreamSchema = z2.object({
+var downstreamSchema = z3.object({
   client_id: boundedClaim(512),
   redirect_uri: boundedClaim(2048),
   resource: boundedClaim(2048),
   code_challenge: opaque,
-  state: z2.string().max(1024).optional()
+  state: z3.string().max(1024).optional()
 }).strict();
-var transactionSchema = z2.object({
-  purpose: z2.literal("oidc-transaction"),
+var transactionSchema = z3.object({
+  purpose: z3.literal("oidc-transaction-v2"),
   clientId: boundedClaim(512),
-  state: opaque,
+  authMethod: authMethodSchema,
+  redirectUri: boundedClaim(2048),
+  browserHash: z3.string().regex(/^[0-9a-f]{64}$/),
   nonce: opaque,
   verifier: opaque,
   downstream: downstreamSchema
@@ -138,7 +162,7 @@ import {
   registerAppTool,
   RESOURCE_MIME_TYPE
 } from "@modelcontextprotocol/ext-apps/server";
-import { z as z3 } from "zod";
+import { z as z4 } from "zod";
 
 // server/handler.ts
 var health = { ok: true, demo: true };
