@@ -1,0 +1,7 @@
+node_modules/
+.vercel/
+api/
+dist/
+test-results/
+playwright-report/
+pnpm-lock.yaml

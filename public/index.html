@@ -1,0 +1,102 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="robots" content="noindex,nofollow" />
+    <title>Acme Home</title>
+    <style>
+      :root {
+        font-family:
+          Inter,
+          -apple-system,
+          BlinkMacSystemFont,
+          "Segoe UI",
+          sans-serif;
+        color: #202a43;
+        background: #f6f8fe;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+      }
+      header {
+        padding: 24px 32px;
+        background: #111d36;
+        color: white;
+        font-size: 22px;
+        font-weight: 700;
+      }
+      main {
+        max-width: 720px;
+        margin: 64px auto;
+        padding: 32px;
+        border: 1px solid #e5eaf5;
+        border-radius: 12px;
+        background: white;
+      }
+      h1 {
+        margin: 12px 0;
+        font-size: 32px;
+      }
+      p {
+        color: #69748b;
+        line-height: 1.7;
+      }
+      .tag {
+        color: #526fbd;
+        font-size: 11px;
+        letter-spacing: 1px;
+      }
+      pre {
+        overflow: auto;
+        padding: 18px;
+        border-radius: 8px;
+        background: #eef2fe;
+        color: #3159aa;
+      }
+      code {
+        overflow-wrap: anywhere;
+      }
+      a {
+        color: #3868e8;
+      }
+      @media (max-width: 760px) {
+        main {
+          margin: 24px 14px;
+          padding: 24px;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <header>Acme Home</header>
+    <main>
+      <span class="tag">SYNTHETIC MCP APP DEMO</span>
+      <h1>Your work, connected.</h1>
+      <p>
+        A home for your day, priorities and goals. Open the interactive
+        dashboard through a compatible MCP Apps host, not as a standalone
+        webpage.
+      </p>
+      <p>
+        Add this site's <a href="/mcp">/mcp</a> endpoint to your host, then
+        call:
+      </p>
+      <pre>{"name":"acme_home","arguments":{}}</pre>
+      <p>
+        The tool is bound to <code>ui://acme-home/home.html</code>. Launch
+        returns the layout; each panel retrieves its own synthetic data through
+        the same tool.
+      </p>
+      <p>
+        No employee accounts or customer services are connected. Local previews
+        do not send messages or create requests. This public demo requires no
+        credentials.
+      </p>
+      <a href="/healthz">Service health</a>
+    </main>
+  </body>
+</html>
