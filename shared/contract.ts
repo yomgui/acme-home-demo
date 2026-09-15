@@ -11,7 +11,33 @@ export const definitions = {
 };
 export const resourceUri = (id: ViewId) => `ui://acme-home/${id}.html`;
 
+const identityFields = {
+  name: z.string(),
+  firstName: z.string(),
+  role: z.string(),
+  avatar: z.string(),
+  fingerprint: z.string(),
+  subjectShort: z.string().optional(),
+};
+export const identitySchema = z.discriminatedUnion("identityMode", [
+  z.object({
+    ...identityFields,
+    identityMode: z.literal("per_member"),
+    synthetic: z.literal(true),
+  }),
+  z.object({
+    ...identityFields,
+    identityMode: z.literal("openwork"),
+    synthetic: z.literal(false),
+    subjectShort: z.string().min(1),
+    email: z.string(),
+    org_id: z.string().min(1),
+  }),
+]);
+export type Identity = z.infer<typeof identitySchema>;
+
 const base = {
+  whoami: identitySchema.optional(),
   demo: z.literal(true),
   generatedAt: z.iso.datetime(),
   generation: z.number().int().positive(),
@@ -85,7 +111,30 @@ export interface ToolResult {
   structuredContent?: unknown;
   content?: unknown;
 }
+export function isAuthFailure(value: unknown): boolean {
+  if (!value || typeof value !== "object")
+    return (
+      typeof value === "string" &&
+      /\b401\b|unauthorized|invalid_token|connect to personalize|needs_connection|authentication required/i.test(
+        value,
+      )
+    );
+  if (
+    ("status" in value && value.status === 401) ||
+    ("code" in value && value.code === 401)
+  )
+    return true;
+  if ("message" in value && isAuthFailure(value.message)) return true;
+  if ("text" in value && isAuthFailure(value.text)) return true;
+  return (
+    "content" in value &&
+    Array.isArray(value.content) &&
+    value.content.some(isAuthFailure)
+  );
+}
 export function parseResult(id: WidgetId, result: ToolResult): Payload {
+  if (result.isError && isAuthFailure(result))
+    throw new Error("Connect to personalize");
   if (result.isError)
     throw new Error(
       "Tool request failed or was denied. Previous data retained.",

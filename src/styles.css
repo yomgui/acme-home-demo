@@ -140,6 +140,10 @@ button {
   padding: 24px 8px 0;
   font-size: 12px;
 }
+.rail-footer > div {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
 .rail-footer small {
   display: block;
   font-size: 9px;
@@ -680,6 +684,7 @@ textarea::placeholder {
   height: 12px;
 }
 .receipt {
+  overflow-wrap: anywhere;
   color: #8d99af;
   font-size: 8px;
   padding-top: 7px;

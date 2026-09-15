@@ -29,6 +29,16 @@ const active =
   VIEW_ID === "home"
     ? widgetIds.map((id) => controllers[id])
     : [controllers[VIEW_ID]];
+const authSubscriptions = active.map((controller) => {
+  let wasUnauthorized = false;
+  return controller.subscribe(() => {
+    const unauthorized =
+      controller.getSnapshot().error === "Connect to personalize";
+    const changed = unauthorized && !wasUnauthorized;
+    wasUnauthorized = unauthorized;
+    if (changed) for (const sibling of active) sibling.requireConnection();
+  });
+});
 const rootElement = document.getElementById("root");
 if (!rootElement) throw new Error("Missing app root");
 const root = createRoot(rootElement);
@@ -45,6 +55,7 @@ const render = (connectionError?: string) =>
 let stopped = false;
 const stop = () => {
   stopped = true;
+  for (const unsubscribe of authSubscriptions) unsubscribe();
   for (const controller of active) controller.stop();
   root.unmount();
 };

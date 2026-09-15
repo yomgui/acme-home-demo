@@ -19,6 +19,12 @@ const mcpUrl = new URL("../api/mcp.mjs", import.meta.url);
 const healthUrl = new URL("../api/healthz.mjs", import.meta.url);
 
 test("generated hosted adapters serve health and the exact MCP launch/resource contract", async (t) => {
+  const previousAuth = process.env.AUTH_REQUIRED;
+  process.env.AUTH_REQUIRED = "false";
+  t.after(() => {
+    if (previousAuth === undefined) delete process.env.AUTH_REQUIRED;
+    else process.env.AUTH_REQUIRED = previousAuth;
+  });
   const mcp = await import(mcpUrl.href);
   const health = await import(healthUrl.href);
   assert.equal(typeof mcp.default, "function");
@@ -95,6 +101,12 @@ test("Vercel packaging includes resources, external dependencies and a neutral s
   assert.equal(config.installCommand, "pnpm install --frozen-lockfile");
   assert.equal(config.functions["api/mcp.mjs"].includeFiles, "dist/**");
   assert.deepEqual(config.rewrites, [
+    { source: "/.well-known/:path*", destination: "/api/mcp" },
+    { source: "/register", destination: "/api/mcp" },
+    { source: "/authorize", destination: "/api/mcp" },
+    { source: "/token", destination: "/api/mcp" },
+    { source: "/oauth/upstream/callback", destination: "/api/mcp" },
+    { source: "/jwks.json", destination: "/api/mcp" },
     { source: "/mcp", destination: "/api/mcp" },
     { source: "/healthz", destination: "/api/healthz" },
   ]);

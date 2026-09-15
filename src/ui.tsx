@@ -82,12 +82,14 @@ export function Widget({ controller }: { controller: WidgetController }) {
   const state = useSyncExternalStore(
     controller.subscribe,
     controller.getSnapshot,
+    controller.getSnapshot,
   );
   const [filter, setFilter] = useState("all");
   const { data } = state;
   return (
     <section
       className={`widget widget-${controller.id}`}
+      data-testid={`${controller.id}-set`}
       aria-label={definitions[controller.id].title}
     >
       <div className="widget-heading">
@@ -112,7 +114,7 @@ export function Widget({ controller }: { controller: WidgetController }) {
           {state.error}
         </p>
       )}
-      {!data && (
+      {!data && !state.error && (
         <p className="empty">
           {state.busy
             ? "Fetching synthetic data…"
@@ -126,7 +128,11 @@ export function Widget({ controller }: { controller: WidgetController }) {
           </div>
           <div className="schedule">
             {data.meetings.map((meeting, index) => (
-              <div key={meeting.id} className={`meeting meeting-${index}`}>
+              <div
+                data-testid="meeting-item"
+                key={meeting.id}
+                className={`meeting meeting-${index}`}
+              >
                 <span className="meeting-time">{meeting.time}</span>
                 <Details title={meeting.title}>{meeting.detail}</Details>
               </div>
@@ -162,6 +168,7 @@ export function Widget({ controller }: { controller: WidgetController }) {
               .filter((item) => filter === "all" || item.severity === filter)
               .map((item) => (
                 <div
+                  data-testid="attention-item"
                   className={`attention-item ${item.severity}`}
                   key={item.id}
                 >
@@ -196,7 +203,7 @@ export function Widget({ controller }: { controller: WidgetController }) {
             </div>
           </div>
           {data.goals.map((goal) => (
-            <div className="goal-item" key={goal.id}>
+            <div data-testid="goal-item" className="goal-item" key={goal.id}>
               <Details title={goal.title}>{goal.detail}</Details>
               <div className="goal-progress">
                 <progress
@@ -233,9 +240,28 @@ export function Widget({ controller }: { controller: WidgetController }) {
         <div className="receipt" role="status">
           {data ? (
             <>
-              Server generation <strong>{data.generation}</strong> ·{" "}
-              {new Date(data.generatedAt).toLocaleTimeString()}
-              <span title={data.providerInstance}>
+              {data.whoami && (
+                <span data-testid={`${controller.id}-identity`}>
+                  Signed in as {data.whoami.name} · sub{" "}
+                  {data.whoami.subjectShort ?? data.whoami.fingerprint}
+                </span>
+              )}
+              Server generation{" "}
+              <strong data-testid={`${controller.id}-generation`}>
+                {data.generation}
+              </strong>{" "}
+              ·{" "}
+              <time
+                data-testid={`${controller.id}-generated-at`}
+                dateTime={data.generatedAt}
+              >
+                {data.generatedAt}
+              </time>
+              <span
+                data-testid={`${controller.id}-instance`}
+                title={data.providerInstance}
+              >
+                Instance {data.providerInstance} ·
                 {state.busy
                   ? "Request in progress"
                   : `${state.successes} accepted result${state.successes === 1 ? "" : "s"}`}{" "}
@@ -334,6 +360,28 @@ export function Dashboard({
   connectionError?: string;
   timeZone?: string;
 }) {
+  const today = useSyncExternalStore(
+    controllers.today.subscribe,
+    controllers.today.getSnapshot,
+    controllers.today.getSnapshot,
+  );
+  const attention = useSyncExternalStore(
+    controllers.attention.subscribe,
+    controllers.attention.getSnapshot,
+    controllers.attention.getSnapshot,
+  );
+  const goals = useSyncExternalStore(
+    controllers.goals.subscribe,
+    controllers.goals.getSnapshot,
+    controllers.goals.getSnapshot,
+  );
+  const states = [today, attention, goals];
+  const needsConnection = states.some(
+    (state) => state.error === "Connect to personalize",
+  );
+  const identity = needsConnection
+    ? undefined
+    : states.find((state) => state.data?.whoami)?.data?.whoami;
   const [search, setSearch] = useState("");
   const [prompt, setPrompt] = useState("");
   const [dialog, setDialog] = useState<{ title: string; body: string } | null>(
@@ -394,9 +442,12 @@ export function Dashboard({
           ))}
         </nav>
         <div className="rail-footer">
-          <span className="avatar">D</span>
+          <span className="avatar">{identity?.avatar ?? "D"}</span>
           <div>
-            Demo viewer<small>Fictional employee</small>
+            <span data-testid="viewer-identity">
+              {identity?.name ?? "Connect to personalize"}
+            </span>
+            <small>{identity?.role ?? "Fictional employee"}</small>
           </div>
         </div>
       </aside>
@@ -413,14 +464,14 @@ export function Dashboard({
             />
             <kbd>Demo</kbd>
           </label>
-          <span className="avatar">D</span>
+          <span className="avatar">{identity?.avatar ?? "D"}</span>
         </header>
         <div className="demo-banner">
           <span className="live-dot" />
           SYNTHETIC DEMO{" "}
           <span>
-            Independent MCP Apps · no employee accounts or customer services
-            connected
+            Independent MCP Apps · synthetic work data, connected-provider
+            identity
           </span>
         </div>
         {connectionError && (
@@ -433,7 +484,9 @@ export function Dashboard({
             <div className="greeting">
               <div>
                 <p className="eyebrow">LET'S MAKE TODAY COUNT</p>
-                <h1>{greeting(timeZone)}</h1>
+                <h1 data-testid="viewer-greeting">
+                  {greeting(timeZone, identity?.firstName)}
+                </h1>
                 <p>
                   Here's what your day looks like. Let's make it a great one.
                 </p>
@@ -620,8 +673,8 @@ export function Dashboard({
             </div>
             <p className="page-note">
               Demo KPI and auxiliary tiles are fixed illustrations. Widget
-              generation and server time reflect actual tool responses; business
-              values intentionally stay stable.
+              generation and server time reflect actual tool responses. Per-user
+              scenarios rotate on Refresh; shared-mode fixtures stay stable.
             </p>
           </main>
           <aside className="right-column" aria-label="Your day and priorities">

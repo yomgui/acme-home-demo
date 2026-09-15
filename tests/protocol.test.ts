@@ -28,10 +28,9 @@ async function fixture(
   t: TestContext,
   provider: WidgetProvider = createSyntheticProvider(),
 ) {
-  const listener = createHttpApp(() => createServer(provider)).listen(
-    0,
-    "127.0.0.1",
-  );
+  const listener = createHttpApp(() => createServer(provider), {
+    authRequired: false,
+  }).listen(0, "127.0.0.1");
   await once(listener, "listening");
   const address = listener.address();
   assert.ok(address && typeof address !== "string");

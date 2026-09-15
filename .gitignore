@@ -6,3 +6,5 @@ playwright-report/
 .env
 .env.*
 .DS_Store
+.vercel
+.env*

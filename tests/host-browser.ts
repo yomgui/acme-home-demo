@@ -18,7 +18,16 @@ const view: ViewId =
 const allowCalls = query.get("deny") !== "1";
 const client = new Client({ name: "acme-sdk-test-host", version: "1" });
 await client.connect(
-  new StreamableHTTPClientTransport(new URL("/mcp", location.href)),
+  new StreamableHTTPClientTransport(
+    new URL(
+      query.get("member") === "a"
+        ? "/fixture-a"
+        : query.get("member") === "b"
+          ? "/fixture-b"
+          : "/mcp",
+      location.href,
+    ),
+  ),
 );
 const { tools } = await client.listTools();
 const result = await client.callTool({
@@ -37,6 +46,10 @@ const bridge = new AppBridge(
 );
 const calls: { name: string; arguments: Record<string, unknown> }[] = [];
 let failAttention = false;
+let unauthorized = query.get("unauthorized") === "1";
+document.getElementById("expire")?.addEventListener("click", () => {
+  unauthorized = true;
+});
 document.getElementById("fail")?.addEventListener("click", () => {
   failAttention = true;
 });
@@ -48,6 +61,11 @@ bridge.oncalltool = async (params) =>
     calls.push({ name: params.name, arguments: params.arguments ?? {} });
     const counter = document.getElementById("calls");
     if (counter) counter.textContent = JSON.stringify(calls);
+    if (unauthorized)
+      return {
+        isError: true,
+        content: [{ type: "text", text: "HTTP 401: Connect to personalize" }],
+      };
     if (!allowCalls)
       return {
         isError: true,

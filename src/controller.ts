@@ -1,6 +1,7 @@
 import {
   definitions,
   parseResult,
+  isAuthFailure,
   type Payload,
   type ToolResult,
   type WidgetId,
@@ -82,6 +83,7 @@ export class WidgetController {
     const previous = this.state.data;
     if (
       previous &&
+      previous.whoami?.fingerprint === data.whoami?.fingerprint &&
       (Date.parse(data.generatedAt) < Date.parse(previous.generatedAt) ||
         (data.providerInstance === previous.providerInstance &&
           data.generation < previous.generation))
@@ -102,7 +104,29 @@ export class WidgetController {
     }
   }
 
+  requireConnection() {
+    if (
+      this.state.error === "Connect to personalize" &&
+      !this.state.data &&
+      !this.state.busy
+    )
+      return;
+    this.request?.abort();
+    this.cancelTimer?.();
+    this.cancelTimer = undefined;
+    this.update({
+      data: null,
+      busy: false,
+      polling: false,
+      error: "Connect to personalize",
+    });
+  }
+
   private fail(error: unknown) {
+    if (isAuthFailure(error)) {
+      this.requireConnection();
+      return;
+    }
     this.setPolling(false);
     this.update({
       error: `${error instanceof Error ? error.message : "Request failed."} Polling paused; retry manually.`,
@@ -120,8 +144,10 @@ export class WidgetController {
     } catch (error) {
       if (!this.stopped && !request.signal.aborted) this.fail(error);
     } finally {
-      this.request = undefined;
-      this.update({ busy: false });
+      if (this.request === request) {
+        this.request = undefined;
+        this.update({ busy: false });
+      }
     }
     return true;
   };

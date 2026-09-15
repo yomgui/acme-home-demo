@@ -1,6 +1,6 @@
 import { createMcpExpressApp } from "@modelcontextprotocol/express";
 import type { McpServer } from "@modelcontextprotocol/server";
-import { handleMcpPost, health, rejectNonPost } from "./handler.ts";
+import { createHandler, health, type HandlerOptions } from "./handler.ts";
 
 export function resolvePort(raw: string = "4328") {
   if (!/^\d+$/.test(raw) || Number(raw) < 1 || Number(raw) > 65535)
@@ -8,7 +8,11 @@ export function resolvePort(raw: string = "4328") {
   return Number(raw);
 }
 
-export function createHttpApp(createServer: () => McpServer) {
+export function createHttpApp(
+  createServer: () => McpServer,
+  options: HandlerOptions = {},
+) {
+  const handler = createHandler({ ...options, sharedServer: createServer });
   const app = createMcpExpressApp({ host: "127.0.0.1" });
   app.use((req, res, next) => {
     const host = req.headers.host;
@@ -25,9 +29,21 @@ export function createHttpApp(createServer: () => McpServer) {
   app.get("/healthz", (_req, res) => {
     res.json(health);
   });
-  app.post("/mcp", (req, res) =>
-    handleMcpPost(createServer, req, res, req.body),
+  app.all(
+    [
+      "/mcp",
+      "/api/mcp",
+      "/.well-known/oauth-authorization-server",
+      "/.well-known/oauth-protected-resource",
+      "/.well-known/oauth-protected-resource/mcp",
+      "/.well-known/jwks.json",
+      "/jwks.json",
+      "/register",
+      "/authorize",
+      "/token",
+      "/oauth/upstream/callback",
+    ],
+    (req, res) => handler(req, res),
   );
-  app.all("/mcp", (_req, res) => rejectNonPost(res));
   return app;
 }

@@ -9,6 +9,12 @@
     "api/healthz.mjs": { "maxDuration": 5 }
   },
   "rewrites": [
+    { "source": "/.well-known/:path*", "destination": "/api/mcp" },
+    { "source": "/register", "destination": "/api/mcp" },
+    { "source": "/authorize", "destination": "/api/mcp" },
+    { "source": "/token", "destination": "/api/mcp" },
+    { "source": "/oauth/upstream/callback", "destination": "/api/mcp" },
+    { "source": "/jwks.json", "destination": "/api/mcp" },
     { "source": "/mcp", "destination": "/api/mcp" },
     { "source": "/healthz", "destination": "/api/healthz" }
   ]
